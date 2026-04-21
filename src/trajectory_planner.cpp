@@ -17,6 +17,7 @@
 
 #include "controllers/iLQR.hpp"
 #include "planning/speed_profile_qp.hpp"
+#include <dynamics/comfort_settings.hpp>
 
 namespace adore
 {
@@ -125,11 +126,19 @@ dynamics::Trajectory
 TrajectoryPlanner::plan_route_trajectory( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
                                           const dynamics::TrafficParticipantSet& traffic_participants )
 {
+  return plan_route_trajectory_with_custom_comfort_settings(latest_route, current_state, traffic_participants, comfort_settings );
+}
+
+
+dynamics::Trajectory
+TrajectoryPlanner::plan_route_trajectory_with_custom_comfort_settings( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
+                                          const dynamics::TrafficParticipantSet& traffic_participants, const dynamics::ComfortSettings custom_comfort_settings )
+{
   double initial_s = latest_route.get_s( current_state );
 
   SpeedProfile speed_profile;
   speed_profile.set_vehicle_parameters( vehicle_params );
-  speed_profile.set_comfort_settings( comfort_settings );
+  speed_profile.set_comfort_settings( custom_comfort_settings );
 
   speed_profile.generate_from_route_and_participants( latest_route, traffic_participants, current_state.vx, initial_s, current_state.time,
                                                       ref_traj_length );

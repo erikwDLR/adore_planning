@@ -28,10 +28,6 @@ struct ObstacleAvoidanceParams
   double front_clearance              = 2.0;
   double rear_clearance               = 2.0;
 
-  // Allowed ego-centerline shift relative to the original route centerline.
-  double max_lateral_shift            = 3.2;
-  double min_lateral_shift            = 0.5;
-  double in_lane_shift_limit          = 1.2;
 
   // Detection corridor: obstacle is relevant only if its raw footprint intersects
   // [-0.5 * ego_width - ego_corridor_safety_margin, +0.5 * ego_width + ego_corridor_safety_margin].
@@ -51,13 +47,33 @@ struct ObstacleAvoidanceParams
   double entry_extra_distance          = 8.0;
   double return_extra_distance         = 14.0;
 
-  // 0.0 disables speed capping. Keep disabled until geometry is stable.
+  // 0.0 disables speed capping
   double max_speed_during_avoidance    = 2.78;  // 10 km/h
 
   // If left and right are equally good, prefer left. This matches right-hand traffic overtaking behavior.
   bool prefer_left_shift               = true;
 
   bool overtaking_allowed              = true;
+
+  // If enabled, a lateral-shift candidate is accepted only if the ego footprint
+  // remains inside the current route lane or, if overtaking is allowed, inside a
+  // connected corridor of driving lanes on the intended shift side.
+  bool enforce_drivable_area           = true;
+
+  // Additional lateral safety margin between ego footprint and lane boundary.
+  double drivable_area_margin          = 0.10;
+
+  // Small tolerance for numerically merging touching lane intervals.
+  double lane_boundary_join_slack      = 0.25;
+
+  // Longitudinal tolerance for considering a neighbouring lane available at the
+  // same lane-local s position. Prevents using a lane outside its actual s range.
+  double lane_s_overlap_slack          = 0.50;
+
+  // If false, overtaking may only use driving lanes with the same direction as
+  // the route lane. If true, opposite-direction driving lanes of the same road
+  // may also be used, subject to the oncoming-traffic check.
+  bool allow_opposite_direction_lanes  = true;
 
   double max_projection_distance_from_route = 5.0;
 

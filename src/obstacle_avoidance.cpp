@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <cstddef>
 
 namespace adore
 {
@@ -37,13 +38,11 @@ struct ObstacleEnvelope
 {
   int id = -1;
 
-  // Raw object extent in route/Frenet-like coordinates before adding safety distances.
   double object_s_min = std::numeric_limits<double>::infinity();
   double object_s_max = -std::numeric_limits<double>::infinity();
   double object_l_min = std::numeric_limits<double>::infinity();
   double object_l_max = -std::numeric_limits<double>::infinity();
 
-  // Inflated envelope used for planning and stop/oncoming checks.
   double s_min = std::numeric_limits<double>::infinity();
   double s_max = -std::numeric_limits<double>::infinity();
   double l_min = std::numeric_limits<double>::infinity();
@@ -51,6 +50,8 @@ struct ObstacleEnvelope
 
   double center_s = std::numeric_limits<double>::infinity();
   double center_l = 0.0;
+
+  std::size_t object_count = 1;
 };
 
 struct ShiftCandidate
@@ -361,15 +362,41 @@ project_obstacle_to_route_analytic( const map::Route& route,
   return true;
 }
 
-std::optional<ObstacleEnvelope>
-find_nearest_static_obstacle_on_route( const map::Route& route,
-                                       const dynamics::VehicleStateDynamic& ego,
-                                       const dynamics::TrafficParticipantSet& traffic_participants,
-                                       const dynamics::PhysicalVehicleParameters& ego_params,
-                                       const ObstacleAvoidanceParams& params )
+void
+refresh_obstacle_envelope_derived_values( ObstacleEnvelope& envelope,
+                                         const ObstacleAvoidanceParams& params )
 {
-  
-  
+  envelope.s_min = envelope.object_s_min - params.front_clearance;
+  envelope.s_max = envelope.object_s_max + params.rear_clearance;
+  envelope.l_min = envelope.object_l_min - params.side_clearance;
+  envelope.l_max = envelope.object_l_max + params.side_clearance;
+
+  envelope.center_s = 0.5 * ( envelope.s_min + envelope.s_max );
+  envelope.center_l = 0.5 * ( envelope.l_min + envelope.l_max );
+}
+
+void
+merge_obstacle_into_cluster( ObstacleEnvelope& cluster,
+                             const ObstacleEnvelope& next,
+                             const ObstacleAvoidanceParams& params )
+{
+  cluster.object_s_min = std::min( cluster.object_s_min, next.object_s_min );
+  cluster.object_s_max = std::max( cluster.object_s_max, next.object_s_max );
+  cluster.object_l_min = std::min( cluster.object_l_min, next.object_l_min );
+  cluster.object_l_max = std::max( cluster.object_l_max, next.object_l_max );
+  cluster.object_count += next.object_count;
+
+  refresh_obstacle_envelope_derived_values( cluster, params );
+}
+
+std::optional<ObstacleEnvelope>
+find_static_obstacle_cluster_on_route(
+  const map::Route& route,
+  const dynamics::VehicleStateDynamic& ego,
+  const dynamics::TrafficParticipantSet& traffic_participants,
+  const dynamics::PhysicalVehicleParameters& ego_params,
+  const ObstacleAvoidanceParams& params )
+{
   const double ego_s = route.get_s( ego );
   if( !std::isfinite( ego_s ) )
   {
@@ -378,17 +405,13 @@ find_nearest_static_obstacle_on_route( const map::Route& route,
 
   const double ego_half_width = 0.5 * ego_params.body_width;
 
-  //
   const double search_start_s = ego_s + params.min_obstacle_route_overlap;
   const double search_end_s   = ego_s + params.max_object_ahead;
 
-  std::optional<ObstacleEnvelope> best;
-  double best_distance_s = std::numeric_limits<double>::infinity();
+  std::vector<ObstacleEnvelope> obstacles;
 
-  // Iterate through all traffic participants and find the nearest relevant static obstacle on route.
   for( const auto& [id, participant] : traffic_participants.participants )
   {
-    // only consider static or very slow objects
     if( std::fabs( participant.state.vx ) > params.max_static_object_speed )
     {
       continue;
@@ -397,7 +420,6 @@ find_nearest_static_obstacle_on_route( const map::Route& route,
     ObstacleEnvelope env;
     env.id = static_cast<int>( id );
 
-    // Project the raw obstacle geometry to route-relative s/l coordinates and apply initial plausibility checks.
     if( !project_obstacle_to_route_analytic(
           route,
           participant,
@@ -409,33 +431,84 @@ find_nearest_static_obstacle_on_route( const map::Route& route,
       continue;
     }
 
-    // Check if the obstacle is within the relevant search range on route.
     if( env.s_max < search_start_s || env.s_min > search_end_s )
     {
-      std::fprintf(
-        stderr,
-        "[OA] ignore obstacle id=%d: inflated_s=[%.2f, %.2f] outside search=[%.2f, %.2f]\n",
-        env.id,
-        env.s_min,
-        env.s_max,
-        search_start_s,
-        search_end_s );
-      std::fflush( stderr );
       continue;
     }
 
-    // The obstacle is relevant. Check if it's the nearest one so far.
-    const double nearest_relevant_s = std::max( env.s_min, ego_s );
+    obstacles.push_back( env );
+  }
+
+  if( obstacles.empty() )
+  {
+    return std::nullopt;
+  }
+
+  std::sort(
+    obstacles.begin(),
+    obstacles.end(),
+    []( const ObstacleEnvelope& a, const ObstacleEnvelope& b )
+    {
+      if( std::fabs( a.object_s_min - b.object_s_min ) < 1e-6 )
+      {
+        return a.object_s_max < b.object_s_max;
+      }
+      return a.object_s_min < b.object_s_min;
+    } );
+
+  std::vector<ObstacleEnvelope> clusters;
+
+  for( const auto& obstacle : obstacles )
+  {
+    if( clusters.empty() ||
+        obstacle.object_s_min > clusters.back().object_s_max + params.obstacle_cluster_join_gap_s )
+    {
+      clusters.push_back( obstacle );
+    }
+    else
+    {
+      merge_obstacle_into_cluster( clusters.back(), obstacle, params );
+    }
+  }
+
+  std::optional<ObstacleEnvelope> best_cluster;
+  double best_distance_s = std::numeric_limits<double>::infinity();
+
+  for( const auto& cluster : clusters )
+  {
+    if( cluster.s_max < search_start_s || cluster.s_min > search_end_s )
+    {
+      continue;
+    }
+
+    const double nearest_relevant_s = std::max( cluster.s_min, ego_s );
     const double distance_s = nearest_relevant_s - ego_s;
 
-    if( !best.has_value() || distance_s < best_distance_s )
+    if( !best_cluster.has_value() || distance_s < best_distance_s )
     {
-      best = env;
+      best_cluster = cluster;
       best_distance_s = distance_s;
     }
   }
 
-  return best;
+  if( best_cluster.has_value() )
+  {
+    std::fprintf(
+      stderr,
+      "[OA][cluster] selected count=%zu first_id=%d raw_s=[%.2f, %.2f] raw_l=[%.2f, %.2f] inflated_s=[%.2f, %.2f] join_gap=%.2f\n",
+      best_cluster->object_count,
+      best_cluster->id,
+      best_cluster->object_s_min,
+      best_cluster->object_s_max,
+      best_cluster->object_l_min,
+      best_cluster->object_l_max,
+      best_cluster->s_min,
+      best_cluster->s_max,
+      params.obstacle_cluster_join_gap_s );
+    std::fflush( stderr );
+  }
+
+  return best_cluster;
 }
 
 bool
@@ -997,7 +1070,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
   result.modified_route = route;
 
   // Find nearest relevant static obstacle on route. This is the only place where the raw obstacle geometry is used.
-  const auto obstacle = find_nearest_static_obstacle_on_route(
+  const auto obstacle = find_static_obstacle_cluster_on_route(
     route,
     ego,
     traffic_participants,

@@ -77,6 +77,11 @@ struct ObstacleAvoidanceParams
 
   double max_projection_distance_from_route = 5.0;
 
+  // Static obstacles with a longitudinal gap below this threshold are treated as
+  // one common obstacle envelope. This prevents returning to the original route
+  // between multiple closely spaced parked vehicles.
+  double obstacle_cluster_join_gap_s = 8.0;
+
 
 };
 

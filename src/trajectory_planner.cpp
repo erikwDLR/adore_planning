@@ -135,7 +135,34 @@ TrajectoryPlanner::plan_route_trajectory_with_custom_comfort_settings( const map
                                           const dynamics::TrafficParticipantSet& traffic_participants, const dynamics::ComfortSettings custom_comfort_settings )
 {
   double initial_s = latest_route.get_s( current_state );
+  return plan_route_trajectory_impl( latest_route, current_state, traffic_participants, initial_s, custom_comfort_settings );
+}
 
+
+dynamics::Trajectory
+TrajectoryPlanner::plan_route_trajectory_from_s( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
+                                                 const dynamics::TrafficParticipantSet& traffic_participants,
+                                                 double initial_s )
+{
+  return plan_route_trajectory_impl( latest_route, current_state, traffic_participants, initial_s, comfort_settings );
+}
+
+
+dynamics::Trajectory
+TrajectoryPlanner::plan_route_trajectory_with_custom_comfort_settings_from_s( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
+                                                 const dynamics::TrafficParticipantSet& traffic_participants,
+                                                 const dynamics::ComfortSettings custom_comfort_settings,
+                                                 double initial_s )
+{
+  return plan_route_trajectory_impl( latest_route, current_state, traffic_participants, initial_s, custom_comfort_settings );
+}
+
+
+dynamics::Trajectory
+TrajectoryPlanner::plan_route_trajectory_impl( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
+                                               const dynamics::TrafficParticipantSet& traffic_participants,
+                                               double initial_s, const dynamics::ComfortSettings& custom_comfort_settings )
+{
   SpeedProfile speed_profile;
   speed_profile.set_vehicle_parameters( vehicle_params );
   speed_profile.set_comfort_settings( custom_comfort_settings );
@@ -180,6 +207,13 @@ TrajectoryPlanner::optimize_trajectory( const dynamics::VehicleStateDynamic& cur
   if( problem->best_cost > 30.0 && current_state.vx > 2.0 && counter < 15 )
   {
     counter++;
+    std::fprintf(
+      stderr,
+      "[planner][fallback] returning previous trajectory: best_cost=%.2f vx=%.2f counter=%d\n",
+      problem->best_cost,
+      current_state.vx,
+      counter );
+    std::fflush( stderr );
     return previous_trajectory;
   }
   counter             = 0;

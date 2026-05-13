@@ -39,7 +39,7 @@ struct ObstacleAvoidanceParams
   double min_obstacle_route_overlap   = 0.5;
   double oncoming_lookahead_after_obj = 35.0;
   double min_oncoming_heading_diff    = 2.35; // rad, about 135 deg
-  double stop_time_step               = 0.3;
+  double stop_time_step               = 0.1;
 
   double stop_distance_before_obstacle = 5.0;
 
@@ -103,6 +103,18 @@ struct ObstacleAvoidanceResult
 
   map::Route modified_route;
   dynamics::Trajectory trajectory;
+
+  bool has_maneuver_bounds = false;
+
+  int obstacle_id = -1;
+
+  double shift_start_s = 0.0;
+  double plateau_start_s = 0.0;
+  double plateau_end_s = 0.0;
+  double shift_end_s = 0.0;
+
+  double lateral_shift = 0.0;
+  bool in_lane = false;
 };
 
 /**

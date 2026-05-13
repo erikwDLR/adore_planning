@@ -71,6 +71,19 @@ struct LateralInterval
   double max_l = -std::numeric_limits<double>::infinity();
 };
 
+struct RouteDifferenceBounds
+{
+  bool has_difference = false;
+
+  double first_different_s = 0.0;
+  double last_different_s = 0.0;
+
+  // First route point after the shifted section where modified_route and
+  // original_route are equal again.
+  double first_equal_s_after_last_difference = 0.0;
+  bool has_equal_point_after_last_difference = false;
+};
+
 double
 normalize_angle( double angle )
 {
@@ -86,6 +99,73 @@ smoothstep01( double t )
   t = std::clamp( t, 0.0, 1.0 );
   return t * t * t * ( t * ( t * 6.0 - 15.0 ) + 10.0 );
 }
+
+bool
+map_points_differ_xy(
+  const adore::map::MapPoint& a,
+  const adore::map::MapPoint& b,
+  const double xy_tolerance )
+{
+  return std::hypot( a.x - b.x, a.y - b.y ) > xy_tolerance;
+}
+
+std::optional<RouteDifferenceBounds>
+find_route_difference_bounds(
+  const adore::map::Route& original_route,
+  const adore::map::Route& modified_route,
+  const double xy_tolerance )
+{
+  RouteDifferenceBounds bounds;
+
+  for( const auto& [s, original_point] : original_route.reference_line )
+  {
+    const auto modified_it = modified_route.reference_line.find( s );
+
+    if( modified_it == modified_route.reference_line.end() )
+    {
+      // If the keys differ, this simple comparison is not valid.
+      // For the current OA implementation this should usually not happen,
+      // because modified_route is a copy of original_route.
+      continue;
+    }
+
+    const bool different =
+      map_points_differ_xy(
+        original_point,
+        modified_it->second,
+        xy_tolerance );
+
+    if( different )
+    {
+      if( !bounds.has_difference )
+      {
+        bounds.first_different_s = s;
+        bounds.has_difference = true;
+      }
+
+      bounds.last_different_s = s;
+
+      // Reset this, because we found a later changed point.
+      bounds.has_equal_point_after_last_difference = false;
+      bounds.first_equal_s_after_last_difference = 0.0;
+    }
+    else if( bounds.has_difference &&
+             !bounds.has_equal_point_after_last_difference )
+    {
+      // This is the first equal point after the currently last changed point.
+      bounds.first_equal_s_after_last_difference = s;
+      bounds.has_equal_point_after_last_difference = true;
+    }
+  }
+
+  if( !bounds.has_difference )
+  {
+    return std::nullopt;
+  }
+
+  return bounds;
+}
+
 
 RouteFrame
 make_route_frame( const map::Route& route, double s )
@@ -112,6 +192,55 @@ shifted_point( const RouteFrame& frame, double lateral_offset )
     frame.y + std::cos( frame.yaw ) * lateral_offset
   };
 }
+
+//Debug fuction
+void debug_modified_route_against_original(
+    const adore::map::Route& original_route,
+    const adore::map::Route& modified_route,
+    double start_s,
+    double end_s )
+{
+    if( original_route.reference_line.empty() ||
+        modified_route.reference_line.empty() ||
+        !std::isfinite( start_s ) ||
+        !std::isfinite( end_s ) ||
+        end_s <= start_s )
+    {
+        return;
+    }
+
+    for( double s = start_s; s <= end_s; s += 1.0 )
+    {
+        const auto orig_it = original_route.reference_line.lower_bound( s );
+        const auto mod_it  = modified_route.reference_line.lower_bound( s );
+
+        if( orig_it == original_route.reference_line.end() ||
+            mod_it == modified_route.reference_line.end() )
+        {
+            continue;
+        }
+
+        const auto& o = orig_it->second;
+        const auto& m = mod_it->second;
+
+        const double dx = m.x - o.x;
+        const double dy = m.y - o.y;
+        const double d  = std::hypot( dx, dy );
+
+        std::printf(
+            "[OA][route_check] query_s=%.2f orig_s=%.2f mod_s=%.2f "
+            "orig=(%.2f, %.2f) mod=(%.2f, %.2f) diff=%.3f\n",
+            s,
+            orig_it->first,
+            mod_it->first,
+            o.x,
+            o.y,
+            m.x,
+            m.y,
+            d );
+    }
+}
+// End of debug function
 
 dynamics::Trajectory
 make_stop_trajectory( const dynamics::VehicleStateDynamic& ego, double dt )
@@ -279,7 +408,7 @@ project_obstacle_to_route_analytic( const map::Route& route,
     {  half_length, -half_width }
   }};
 
-  // Sanath-like idea, but kept local: build the rotated obstacle footprint directly
+  // idea: build the rotated obstacle footprint directly
   // in route-relative s/l coordinates. This avoids route.get_s(corner) for each corner.
   for( const auto& [local_x, local_y] : local_corners )
   {
@@ -1023,6 +1152,40 @@ choose_shift_candidate( const map::Route& route,
   return abs_left < abs_right ? left : right;
 }
 
+// map::Route
+// build_modified_avoidance_route( const map::Route& route,
+//                                 const ObstacleEnvelope& obstacle,
+//                                 double lateral_shift,
+//                                 const ObstacleAvoidanceParams& params )
+// {
+//   map::Route modified_route = route;
+
+//   for( auto& [s, point] : modified_route.reference_line )
+//   {
+//     const double alpha = avoidance_shift_alpha_at_s( s, obstacle, params );
+//     if( alpha <= 0.0 )
+//     {
+//       continue;
+//     }
+
+//     const double offset = lateral_shift * alpha;
+//     const auto frame = make_route_frame( route, s );
+//     const auto shifted_point_xy = shifted_point( frame, offset );
+
+//     point.x = shifted_point_xy.x;
+//     point.y = shifted_point_xy.y;
+
+//     if( params.max_speed_during_avoidance > 0.0 )
+//     {
+//       point.max_speed = std::min(
+//         point.max_speed.value_or( params.max_speed_during_avoidance ),
+//         params.max_speed_during_avoidance );
+//     }
+//   }
+
+//   return modified_route;
+// }
+
 map::Route
 build_modified_avoidance_route( const map::Route& route,
                                 const ObstacleEnvelope& obstacle,
@@ -1034,12 +1197,15 @@ build_modified_avoidance_route( const map::Route& route,
   for( auto& [s, point] : modified_route.reference_line )
   {
     const double alpha = avoidance_shift_alpha_at_s( s, obstacle, params );
+
     if( alpha <= 0.0 )
     {
       continue;
     }
 
     const double offset = lateral_shift * alpha;
+
+    // Important: use the original route as reference frame.
     const auto frame = make_route_frame( route, s );
     const auto shifted_point_xy = shifted_point( frame, offset );
 
@@ -1053,6 +1219,114 @@ build_modified_avoidance_route( const map::Route& route,
         params.max_speed_during_avoidance );
     }
   }
+
+  std::fprintf(
+    stderr,
+    "[OA][modified_route] "
+    "s alpha offset "
+    "orig_x orig_y mod_x mod_y "
+    "dx dy shift_dist "
+    "orig_seg_len mod_seg_len "
+    "mod_heading mod_heading_delta\n" );
+
+  bool has_prev = false;
+
+  map::MapPoint prev_orig;
+  map::MapPoint prev_mod;
+
+  double prev_mod_heading = 0.0;
+  bool has_prev_heading = false;
+
+  for( const auto& [s, point] : modified_route.reference_line )
+  {
+    const auto original_point_it = route.reference_line.find( s );
+
+    if( original_point_it == route.reference_line.end() )
+    {
+      continue;
+    }
+
+    const auto& original_point = original_point_it->second;
+
+    const double alpha = avoidance_shift_alpha_at_s( s, obstacle, params );
+    const double offset = lateral_shift * alpha;
+
+    const double dx = point.x - original_point.x;
+    const double dy = point.y - original_point.y;
+    const double shift_distance = std::hypot( dx, dy );
+
+    // Only log relevant maneuver points.
+    if( alpha <= 0.0 && shift_distance < 1e-4 )
+    {
+      continue;
+    }
+
+    double orig_seg_len = 0.0;
+    double mod_seg_len = 0.0;
+    double mod_heading = 0.0;
+    double mod_heading_delta = 0.0;
+
+    if( has_prev )
+    {
+      const double orig_dx = original_point.x - prev_orig.x;
+      const double orig_dy = original_point.y - prev_orig.y;
+
+      const double mod_dx = point.x - prev_mod.x;
+      const double mod_dy = point.y - prev_mod.y;
+
+      orig_seg_len = std::hypot( orig_dx, orig_dy );
+      mod_seg_len = std::hypot( mod_dx, mod_dy );
+
+      mod_heading = std::atan2( mod_dy, mod_dx );
+
+      if( has_prev_heading )
+      {
+        mod_heading_delta = mod_heading - prev_mod_heading;
+
+        while( mod_heading_delta > M_PI )
+        {
+          mod_heading_delta -= 2.0 * M_PI;
+        }
+
+        while( mod_heading_delta < -M_PI )
+        {
+          mod_heading_delta += 2.0 * M_PI;
+        }
+      }
+
+      prev_mod_heading = mod_heading;
+      has_prev_heading = true;
+    }
+
+    std::fprintf(
+      stderr,
+      "[OA][modified_route] "
+      "s=%.2f alpha=%.4f offset=%.4f "
+      "orig=(%.3f, %.3f) mod=(%.3f, %.3f) "
+      "dx=%.3f dy=%.3f shift_dist=%.3f "
+      "orig_seg_len=%.3f mod_seg_len=%.3f "
+      "mod_heading=%.4f mod_heading_delta=%.4f\n",
+      s,
+      alpha,
+      offset,
+      original_point.x,
+      original_point.y,
+      point.x,
+      point.y,
+      dx,
+      dy,
+      shift_distance,
+      orig_seg_len,
+      mod_seg_len,
+      mod_heading,
+      mod_heading_delta );
+
+    prev_orig = original_point;
+    prev_mod = point;
+    has_prev = true;
+  }
+
+  std::fflush( stderr );
 
   return modified_route;
 }
@@ -1169,11 +1443,40 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     lateral_shift,
     params );
 
-  result.trajectory = planner.plan_route_trajectory(
-    result.modified_route,
-    ego,
-    traffic_participants );
+  // result.trajectory = planner.plan_route_trajectory(
+  //   result.modified_route,
+  //   ego,
+  //   traffic_participants );
 
+  const double ego_s_original = route.get_s( ego );
+
+  double ego_s_modified =
+      adore::map::get_s_on_reference_line_segments(
+          result.modified_route,
+          ego,
+          ego_s_original,
+          20.0 );
+
+  if( !std::isfinite( ego_s_modified ) )
+  {
+      ego_s_modified = ego_s_original;
+  }
+
+  if( !std::isfinite( ego_s_modified ) )
+  {
+      return plan_stop_before_obstacle(
+          ObstacleAvoidanceMode::StopBeforeObstacle,
+          "driving mission (stop before obstacle: invalid modified-route projection)" );
+  }
+
+  result.trajectory = planner.plan_route_trajectory_from_s(
+      result.modified_route,
+      ego,
+      traffic_participants,
+      ego_s_modified );
+
+
+      
   if( result.trajectory.states.empty() )
   {
     return plan_stop_before_obstacle(
@@ -1196,6 +1499,62 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
   result.success = true;
   result.reason = "planned obstacle avoidance by modifying route points";
+
+
+    const auto route_diff_bounds =
+    find_route_difference_bounds(
+      route,
+      result.modified_route,
+      // 0.02 );
+      0.0 );
+
+    if( route_diff_bounds.has_value() )
+    {
+      const double route_equal_again_s =
+        route_diff_bounds->has_equal_point_after_last_difference
+          ? route_diff_bounds->first_equal_s_after_last_difference
+          : route_diff_bounds->last_different_s;
+
+      result.has_maneuver_bounds = true;
+      result.shift_start_s = route_diff_bounds->first_different_s;
+      result.shift_end_s = route_equal_again_s;
+
+      //Debug
+    debug_modified_route_against_original(
+    route,
+    result.modified_route,
+    result.shift_start_s - 2.0,
+    result.shift_end_s + 2.0 );
+
+      // Optional: keep analytical values for debug
+      result.plateau_start_s =
+        std::max( 0.0, obstacle.value().object_s_min - params.front_clearance );
+
+      result.plateau_end_s =
+        obstacle.value().object_s_max + params.rear_clearance;
+
+      result.obstacle_id = obstacle.value().id;
+      result.lateral_shift = lateral_shift;
+      result.in_lane = shift_candidate->in_lane;
+
+      std::fprintf(
+        stderr,
+        "[OA][route_diff] first_diff_s=%.2f last_diff_s=%.2f equal_again_s=%.2f has_equal_after=%s\n",
+        route_diff_bounds->first_different_s,
+        route_diff_bounds->last_different_s,
+        route_equal_again_s,
+        route_diff_bounds->has_equal_point_after_last_difference ? "true" : "false" );
+      std::fflush( stderr );
+    }
+    else
+    {
+      std::fprintf(
+        stderr,
+        "[OA][route_diff] warning: modified route has no detectable difference to original route\n" );
+      std::fflush( stderr );
+    }
+
+
 
   return result;
 }

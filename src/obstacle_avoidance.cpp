@@ -52,6 +52,8 @@ struct ObstacleEnvelope
   double center_l = 0.0;
 
   std::size_t object_count = 1;
+
+  bool overlaps_ego_corridor = false;
 };
 
 struct ShiftCandidate
@@ -193,55 +195,6 @@ shifted_point( const RouteFrame& frame, double lateral_offset )
   };
 }
 
-//Debug fuction
-void debug_modified_route_against_original(
-    const adore::map::Route& original_route,
-    const adore::map::Route& modified_route,
-    double start_s,
-    double end_s )
-{
-    if( original_route.reference_line.empty() ||
-        modified_route.reference_line.empty() ||
-        !std::isfinite( start_s ) ||
-        !std::isfinite( end_s ) ||
-        end_s <= start_s )
-    {
-        return;
-    }
-
-    for( double s = start_s; s <= end_s; s += 1.0 )
-    {
-        const auto orig_it = original_route.reference_line.lower_bound( s );
-        const auto mod_it  = modified_route.reference_line.lower_bound( s );
-
-        if( orig_it == original_route.reference_line.end() ||
-            mod_it == modified_route.reference_line.end() )
-        {
-            continue;
-        }
-
-        const auto& o = orig_it->second;
-        const auto& m = mod_it->second;
-
-        const double dx = m.x - o.x;
-        const double dy = m.y - o.y;
-        const double d  = std::hypot( dx, dy );
-
-        std::printf(
-            "[OA][route_check] query_s=%.2f orig_s=%.2f mod_s=%.2f "
-            "orig=(%.2f, %.2f) mod=(%.2f, %.2f) diff=%.3f\n",
-            s,
-            orig_it->first,
-            mod_it->first,
-            o.x,
-            o.y,
-            m.x,
-            m.y,
-            d );
-    }
-}
-// End of debug function
-
 dynamics::Trajectory
 make_stop_trajectory( const dynamics::VehicleStateDynamic& ego, double dt )
 {
@@ -378,28 +331,101 @@ project_obstacle_to_route_analytic( const map::Route& route,
                                     double ego_half_width,
                                     ObstacleEnvelope& envelope )
 {
-  const double center_s = route.get_s( participant.state );
-  if( !std::isfinite( center_s ) )
+  if( route.reference_line.size() < 2 )
   {
     return false;
   }
 
-  const double ahead = center_s - ego_s;
-  if( ahead < -params.rear_clearance || ahead > params.max_object_ahead + params.front_clearance )
+  envelope.object_s_min =  std::numeric_limits<double>::infinity();
+  envelope.object_s_max = -std::numeric_limits<double>::infinity();
+  envelope.object_l_min =  std::numeric_limits<double>::infinity();
+  envelope.object_l_max = -std::numeric_limits<double>::infinity();
+
+  envelope.s_min =  std::numeric_limits<double>::infinity();
+  envelope.s_max = -std::numeric_limits<double>::infinity();
+  envelope.l_min =  std::numeric_limits<double>::infinity();
+  envelope.l_max = -std::numeric_limits<double>::infinity();
+
+  envelope.object_count = 1;
+
+  struct Projection
   {
-    return false;
-  }
+    double s = std::numeric_limits<double>::quiet_NaN();
+    double l = std::numeric_limits<double>::quiet_NaN();
+    double distance = std::numeric_limits<double>::infinity();
+  };
 
-  const auto center_frame = make_route_frame( route, center_s );
-  const math::Point2d center_point{ participant.state.x, participant.state.y };
-  const double center_l = signed_lateral_offset( center_frame, center_point );
+  auto project_xy_to_route =
+    [&]( double x, double y ) -> std::optional<Projection>
+    {
+      Projection best;
 
-  const double rel_yaw = normalize_angle( participant.state.yaw_angle - center_frame.yaw );
-  const double cos_yaw = std::cos( rel_yaw );
-  const double sin_yaw = std::sin( rel_yaw );
+      auto it_prev = route.reference_line.begin();
+      auto it      = std::next( it_prev );
 
-  const double half_length = 0.5 * std::max( 0.1, participant.physical_parameters.body_length );
-  const double half_width  = 0.5 * std::max( 0.1, participant.physical_parameters.body_width );
+      for( ; it != route.reference_line.end(); ++it, ++it_prev )
+      {
+        const double s0 = it_prev->first;
+        const double s1 = it->first;
+
+        const auto& p0 = it_prev->second;
+        const auto& p1 = it->second;
+
+        const double dx = p1.x - p0.x;
+        const double dy = p1.y - p0.y;
+
+        const double len2 = dx * dx + dy * dy;
+        if( len2 < 1e-9 )
+        {
+          continue;
+        }
+
+        const double t_raw =
+          ( ( x - p0.x ) * dx + ( y - p0.y ) * dy ) / len2;
+
+        const double t = std::max( 0.0, std::min( 1.0, t_raw ) );
+
+        const double px = p0.x + t * dx;
+        const double py = p0.y + t * dy;
+
+        const double ex = x - px;
+        const double ey = y - py;
+
+        const double distance2 = ex * ex + ey * ey;
+
+        if( distance2 < best.distance * best.distance )
+        {
+          const double len = std::sqrt( len2 );
+
+          const double nx = -dy / len;
+          const double ny =  dx / len;
+
+          best.s = s0 + t * ( s1 - s0 );
+          best.l = ex * nx + ey * ny;
+          best.distance = std::sqrt( distance2 );
+        }
+      }
+
+      if( !std::isfinite( best.s ) || !std::isfinite( best.l ) )
+      {
+        return std::nullopt;
+      }
+
+      return best;
+    };
+
+  const double center_x = participant.state.x;
+  const double center_y = participant.state.y;
+  const double yaw      = participant.state.yaw_angle;
+
+  const double cos_yaw = std::cos( yaw );
+  const double sin_yaw = std::sin( yaw );
+
+  const double half_length =
+    0.5 * std::max( 0.1, participant.physical_parameters.body_length );
+
+  const double half_width =
+    0.5 * std::max( 0.1, participant.physical_parameters.body_width );
 
   const std::array<std::pair<double, double>, 4> local_corners = {{
     { -half_length, -half_width },
@@ -408,17 +434,51 @@ project_obstacle_to_route_analytic( const map::Route& route,
     {  half_length, -half_width }
   }};
 
-  // idea: build the rotated obstacle footprint directly
-  // in route-relative s/l coordinates. This avoids route.get_s(corner) for each corner.
+  bool any_valid_projection = false;
+  double min_corner_distance = std::numeric_limits<double>::infinity();
+
   for( const auto& [local_x, local_y] : local_corners )
   {
-    const double corner_s = center_s + local_x * cos_yaw - local_y * sin_yaw;
-    const double corner_l = center_l + local_x * sin_yaw + local_y * cos_yaw;
+    const double corner_x =
+      center_x + local_x * cos_yaw - local_y * sin_yaw;
 
-    envelope.object_s_min = std::min( envelope.object_s_min, corner_s );
-    envelope.object_s_max = std::max( envelope.object_s_max, corner_s );
-    envelope.object_l_min = std::min( envelope.object_l_min, corner_l );
-    envelope.object_l_max = std::max( envelope.object_l_max, corner_l );
+    const double corner_y =
+      center_y + local_x * sin_yaw + local_y * cos_yaw;
+
+    const auto projection = project_xy_to_route( corner_x, corner_y );
+
+    if( !projection.has_value() )
+    {
+      continue;
+    }
+
+    min_corner_distance =
+      std::min( min_corner_distance, projection->distance );
+
+    any_valid_projection = true;
+
+    envelope.object_s_min =
+      std::min( envelope.object_s_min, projection->s );
+
+    envelope.object_s_max =
+      std::max( envelope.object_s_max, projection->s );
+
+    envelope.object_l_min =
+      std::min( envelope.object_l_min, projection->l );
+
+    envelope.object_l_max =
+      std::max( envelope.object_l_max, projection->l );
+  }
+
+  if( !any_valid_projection )
+  {
+
+    return false;
+  }
+
+  if( params.max_projection_distance_from_route > 0.0 && min_corner_distance > params.max_projection_distance_from_route )
+  {
+    return false;
   }
 
   if( !std::isfinite( envelope.object_s_min ) ||
@@ -429,21 +489,32 @@ project_obstacle_to_route_analytic( const map::Route& route,
     return false;
   }
 
-  if( std::max( std::fabs( envelope.object_l_min ), std::fabs( envelope.object_l_max ) ) >
-      params.max_object_lateral_distance )
+  if( envelope.object_s_max < ego_s - params.rear_clearance )
   {
-    std::fprintf(
-      stderr,
-      "[OA] reject obstacle id=%d: implausible raw_l=[%.2f, %.2f], max_object_lateral_distance=%.2f\n",
-      envelope.id,
-      envelope.object_l_min,
-      envelope.object_l_max,
-      params.max_object_lateral_distance );
-    std::fflush( stderr );
     return false;
   }
 
-  const double corridor_half_width = ego_half_width + params.ego_corridor_safety_margin;
+  if( std::max( std::fabs( envelope.object_l_min ),
+                std::fabs( envelope.object_l_max ) ) >
+      params.max_object_lateral_distance )
+  {
+    return false;
+  }
+
+  const double center_s =
+    0.5 * ( envelope.object_s_min + envelope.object_s_max );
+
+  const double center_l =
+    0.5 * ( envelope.object_l_min + envelope.object_l_max );
+
+  const auto center_frame = make_route_frame( route, center_s );
+
+  const double rel_yaw =
+    normalize_angle( participant.state.yaw_angle - center_frame.yaw );
+
+  const double corridor_half_width =
+    ego_half_width + params.ego_corridor_safety_margin;
+
   const bool overlaps_ego_corridor =
     envelope.object_l_min <= corridor_half_width &&
     envelope.object_l_max >= -corridor_half_width;
@@ -459,7 +530,7 @@ project_obstacle_to_route_analytic( const map::Route& route,
     stderr,
     "[OA] obstacle id=%d: center_s=%.2f center_l=%.2f rel_yaw=%.2f "
     "raw_s=[%.2f, %.2f] raw_l=[%.2f, %.2f] corridor=[%.2f, %.2f] "
-    "distance_to_corridor=%.2f overlap=%s\n",
+    "distance_to_corridor=%.2f overlap=%s min_corner_distance=%.2f\n",
     envelope.id,
     center_s,
     center_l,
@@ -471,17 +542,15 @@ project_obstacle_to_route_analytic( const map::Route& route,
     -corridor_half_width,
     corridor_half_width,
     distance_to_corridor,
-    overlaps_ego_corridor ? "true" : "false" );
+    overlaps_ego_corridor ? "true" : "false",
+    min_corner_distance );
   std::fflush( stderr );
 
-  if( !overlaps_ego_corridor )
-  {
-    return false;
-  }
+  envelope.overlaps_ego_corridor = overlaps_ego_corridor;
 
-  // Planning envelope. Inflate only after relevance was established on raw geometry.
   envelope.s_min = envelope.object_s_min - params.front_clearance;
   envelope.s_max = envelope.object_s_max + params.rear_clearance;
+
   envelope.l_min = envelope.object_l_min - params.side_clearance;
   envelope.l_max = envelope.object_l_max + params.side_clearance;
 
@@ -515,6 +584,8 @@ merge_obstacle_into_cluster( ObstacleEnvelope& cluster,
   cluster.object_l_max = std::max( cluster.object_l_max, next.object_l_max );
   cluster.object_count += next.object_count;
 
+  cluster.overlaps_ego_corridor = cluster.overlaps_ego_corridor || next.overlaps_ego_corridor;
+
   refresh_obstacle_envelope_derived_values( cluster, params );
 }
 
@@ -537,12 +608,18 @@ find_static_obstacle_cluster_on_route(
   const double search_start_s = ego_s + params.min_obstacle_route_overlap;
   const double search_end_s   = ego_s + params.max_object_ahead;
 
+  const double cluster_search_end_s =
+    search_end_s +
+    params.obstacle_cluster_join_gap_s +
+    params.front_clearance +
+    params.rear_clearance;
+
   std::vector<ObstacleEnvelope> obstacles;
 
   for( const auto& [id, participant] : traffic_participants.participants )
   {
     if( std::fabs( participant.state.vx ) > params.max_static_object_speed )
-    {
+    { 
       continue;
     }
 
@@ -560,7 +637,7 @@ find_static_obstacle_cluster_on_route(
       continue;
     }
 
-    if( env.s_max < search_start_s || env.s_min > search_end_s )
+    if( env.s_max < search_start_s || env.s_min > cluster_search_end_s )
     {
       continue;
     }
@@ -605,6 +682,11 @@ find_static_obstacle_cluster_on_route(
 
   for( const auto& cluster : clusters )
   {
+    if( !cluster.overlaps_ego_corridor )
+    {
+      continue;
+    }
+
     if( cluster.s_max < search_start_s || cluster.s_min > search_end_s )
     {
       continue;
@@ -1152,39 +1234,6 @@ choose_shift_candidate( const map::Route& route,
   return abs_left < abs_right ? left : right;
 }
 
-// map::Route
-// build_modified_avoidance_route( const map::Route& route,
-//                                 const ObstacleEnvelope& obstacle,
-//                                 double lateral_shift,
-//                                 const ObstacleAvoidanceParams& params )
-// {
-//   map::Route modified_route = route;
-
-//   for( auto& [s, point] : modified_route.reference_line )
-//   {
-//     const double alpha = avoidance_shift_alpha_at_s( s, obstacle, params );
-//     if( alpha <= 0.0 )
-//     {
-//       continue;
-//     }
-
-//     const double offset = lateral_shift * alpha;
-//     const auto frame = make_route_frame( route, s );
-//     const auto shifted_point_xy = shifted_point( frame, offset );
-
-//     point.x = shifted_point_xy.x;
-//     point.y = shifted_point_xy.y;
-
-//     if( params.max_speed_during_avoidance > 0.0 )
-//     {
-//       point.max_speed = std::min(
-//         point.max_speed.value_or( params.max_speed_during_avoidance ),
-//         params.max_speed_during_avoidance );
-//     }
-//   }
-
-//   return modified_route;
-// }
 
 map::Route
 build_modified_avoidance_route( const map::Route& route,
@@ -1219,114 +1268,6 @@ build_modified_avoidance_route( const map::Route& route,
         params.max_speed_during_avoidance );
     }
   }
-
-  std::fprintf(
-    stderr,
-    "[OA][modified_route] "
-    "s alpha offset "
-    "orig_x orig_y mod_x mod_y "
-    "dx dy shift_dist "
-    "orig_seg_len mod_seg_len "
-    "mod_heading mod_heading_delta\n" );
-
-  bool has_prev = false;
-
-  map::MapPoint prev_orig;
-  map::MapPoint prev_mod;
-
-  double prev_mod_heading = 0.0;
-  bool has_prev_heading = false;
-
-  for( const auto& [s, point] : modified_route.reference_line )
-  {
-    const auto original_point_it = route.reference_line.find( s );
-
-    if( original_point_it == route.reference_line.end() )
-    {
-      continue;
-    }
-
-    const auto& original_point = original_point_it->second;
-
-    const double alpha = avoidance_shift_alpha_at_s( s, obstacle, params );
-    const double offset = lateral_shift * alpha;
-
-    const double dx = point.x - original_point.x;
-    const double dy = point.y - original_point.y;
-    const double shift_distance = std::hypot( dx, dy );
-
-    // Only log relevant maneuver points.
-    if( alpha <= 0.0 && shift_distance < 1e-4 )
-    {
-      continue;
-    }
-
-    double orig_seg_len = 0.0;
-    double mod_seg_len = 0.0;
-    double mod_heading = 0.0;
-    double mod_heading_delta = 0.0;
-
-    if( has_prev )
-    {
-      const double orig_dx = original_point.x - prev_orig.x;
-      const double orig_dy = original_point.y - prev_orig.y;
-
-      const double mod_dx = point.x - prev_mod.x;
-      const double mod_dy = point.y - prev_mod.y;
-
-      orig_seg_len = std::hypot( orig_dx, orig_dy );
-      mod_seg_len = std::hypot( mod_dx, mod_dy );
-
-      mod_heading = std::atan2( mod_dy, mod_dx );
-
-      if( has_prev_heading )
-      {
-        mod_heading_delta = mod_heading - prev_mod_heading;
-
-        while( mod_heading_delta > M_PI )
-        {
-          mod_heading_delta -= 2.0 * M_PI;
-        }
-
-        while( mod_heading_delta < -M_PI )
-        {
-          mod_heading_delta += 2.0 * M_PI;
-        }
-      }
-
-      prev_mod_heading = mod_heading;
-      has_prev_heading = true;
-    }
-
-    std::fprintf(
-      stderr,
-      "[OA][modified_route] "
-      "s=%.2f alpha=%.4f offset=%.4f "
-      "orig=(%.3f, %.3f) mod=(%.3f, %.3f) "
-      "dx=%.3f dy=%.3f shift_dist=%.3f "
-      "orig_seg_len=%.3f mod_seg_len=%.3f "
-      "mod_heading=%.4f mod_heading_delta=%.4f\n",
-      s,
-      alpha,
-      offset,
-      original_point.x,
-      original_point.y,
-      point.x,
-      point.y,
-      dx,
-      dy,
-      shift_distance,
-      orig_seg_len,
-      mod_seg_len,
-      mod_heading,
-      mod_heading_delta );
-
-    prev_orig = original_point;
-    prev_mod = point;
-    has_prev = true;
-  }
-
-  std::fflush( stderr );
 
   return modified_route;
 }
@@ -1443,11 +1384,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     lateral_shift,
     params );
 
-  // result.trajectory = planner.plan_route_trajectory(
-  //   result.modified_route,
-  //   ego,
-  //   traffic_participants );
-
   const double ego_s_original = route.get_s( ego );
 
   double ego_s_modified =
@@ -1476,7 +1412,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       ego_s_modified );
 
 
-      
+
   if( result.trajectory.states.empty() )
   {
     return plan_stop_before_obstacle(
@@ -1505,8 +1441,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     find_route_difference_bounds(
       route,
       result.modified_route,
-      // 0.02 );
-      0.0 );
+      0.02 ); // 2cm point distance threshold for difference detection
 
     if( route_diff_bounds.has_value() )
     {
@@ -1518,13 +1453,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       result.has_maneuver_bounds = true;
       result.shift_start_s = route_diff_bounds->first_different_s;
       result.shift_end_s = route_equal_again_s;
-
-      //Debug
-    debug_modified_route_against_original(
-    route,
-    result.modified_route,
-    result.shift_start_s - 2.0,
-    result.shift_end_s + 2.0 );
 
       // Optional: keep analytical values for debug
       result.plateau_start_s =

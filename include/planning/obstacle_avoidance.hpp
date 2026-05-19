@@ -83,6 +83,20 @@ struct ObstacleAvoidanceParams
   // between multiple closely spaced parked vehicles.
   double obstacle_cluster_join_gap_s = 8.0;
 
+  // Generate and evaluate multiple route-shift variants instead of accepting
+  // the first feasible left/right shift. Variants add lateral clearance and can
+  // stretch the entry/return distances for smoother, more conservative motion.
+  bool enable_multi_candidate_route_shift = true;
+  int lateral_candidate_extra_steps = 2;
+  double lateral_candidate_extra_step = 0.30;
+  double candidate_longitudinal_stretch_factor = 1.50;
+
+  // Hard validation of the planned trajectory after route shifting. This checks
+  // the actual optimized ego footprint against drivable lane intervals and the
+  // static obstacle envelope, not only the shifted reference line.
+  bool validate_shifted_trajectory = true;
+  double trajectory_validation_lateral_margin = 0.05;
+
   // ============================================================================
   // Oncoming traffic gap-acceptance parameters (improved time-based check)
   // ============================================================================
@@ -321,7 +335,8 @@ monitor_active_obstacle_avoidance_maneuver(
   const dynamics::VehicleStateDynamic& ego,
   const dynamics::TrafficParticipantSet& traffic_participants,
   const ObstacleAvoidanceManeuver& maneuver,
-  const ObstacleAvoidanceParams& params = {} );
+  const ObstacleAvoidanceParams& params = {},
+  const dynamics::Trajectory* candidate_ego_trajectory = nullptr );
 
 ObstacleAvoidanceResult
 try_plan_obstacle_avoidance( TrajectoryPlanner& planner,

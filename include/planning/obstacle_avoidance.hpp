@@ -13,6 +13,7 @@
 
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace adore
 {
@@ -21,11 +22,12 @@ namespace planner
 
 struct ObstacleAvoidanceParams
 {
-  double max_object_ahead             = 45.0;
+  // Maximum distance ahead of ego in which static obstacles are considered.
+  double max_object_ahead             = 60.0;
   double max_static_object_speed      = 0.5;
 
   // Safety distances around the detected raw obstacle footprint.
-  double side_clearance               = 0.2;
+  double side_clearance               = 0.4;
   double front_clearance              = 2.0;
   double rear_clearance               = 2.0;
 
@@ -35,18 +37,18 @@ struct ObstacleAvoidanceParams
   double ego_corridor_safety_margin       = 0.2;
 
   // Plausibility filter for bad route projections / unrelated objects.
-  double max_object_lateral_distance  = 20.0;
+  double max_object_lateral_distance  = 8.0;
 
   double min_obstacle_route_overlap   = 0.5;
-  double oncoming_lookahead_after_obj = 35.0;
+  //double oncoming_lookahead_after_obj = 35.0;
   double min_oncoming_heading_diff    = 2.35; // rad, about 135 deg
   double stop_time_step               = 0.1;
 
-  double stop_distance_before_obstacle = 5.0;
+  double stop_distance_before_obstacle = 8.0;
 
   // The route points are modified directly. These distances shape the x^5 transition.
-  double entry_extra_distance          = 8.0;
-  double return_extra_distance         = 14.0;
+  double entry_extra_distance          = 10.0;
+  double return_extra_distance         = 10.0;
 
   // 0.0 disables speed capping
   double max_speed_during_avoidance    = 2.78;  // 10 km/h
@@ -78,10 +80,29 @@ struct ObstacleAvoidanceParams
 
   double max_projection_distance_from_route = 5.0;
 
-  // Static obstacles with a longitudinal gap below this threshold are treated as
-  // one common obstacle envelope. This prevents returning to the original route
-  // between multiple closely spaced parked vehicles.
-  double obstacle_cluster_join_gap_s = 8.0;
+  // Multi-obstacle grouping.
+  //
+  // obstacle_cluster_join_gap_s is the legacy geometric pre-clustering threshold.
+  // It should usually be close to cluster_hold_gap_s. In the current grouping
+  // logic the effective geometric join gap is bounded by cluster_hold_gap_s.
+  double obstacle_cluster_join_gap_s = 10.0;
+
+  // Gap <= cluster_hold_gap_s:
+  //   hard-merge the obstacles and hold the full lateral shift through the gap.
+  //
+  // cluster_hold_gap_s < gap <= shift_hull_gap_s:
+  //   keep the raw obstacle envelopes separate, but create one AvoidanceGroup
+  //   and connect the individual shift profiles with a smooth hull bridge.
+  //
+  // gap > shift_hull_gap_s:
+  //   treat the obstacles as separate maneuvers.
+  double cluster_hold_gap_s = 10.0;
+  double shift_hull_gap_s = 35.0;
+
+  // Minimum shift fraction between hull-linked obstacles.
+  // 0.0 = allow full return, 1.0 = keep full shift. 0.5 makes the hull visible
+  // and avoids returning completely before the next obstacle.
+  double min_alpha_between_hull_obstacles = 0.5;
 
   // Generate and evaluate multiple route-shift variants instead of accepting
   // the first feasible left/right shift. Variants add lateral clearance and can
@@ -123,7 +144,7 @@ struct ObstacleAvoidanceParams
   double prediction_time_horizon = 12.0;
 
   // Time step for sampling predicted trajectories (if available).
-  double prediction_time_step = 0.2;
+  //double prediction_time_step = 0.2;
 
   // Safety distance from ego footprint front to oncoming vehicle rear during conflict.
   double oncoming_safety_distance_front = 10.0;
@@ -161,7 +182,7 @@ struct ObstacleAvoidanceParams
 
   // Desired distance between the ego front and the nearest footprint point of
   // the oncoming participant when the ego vehicle comes to rest.
-  double ego_lane_oncoming_stop_distance = 10.0;
+  double ego_lane_oncoming_stop_distance = 15.0;
 };
 
 

@@ -145,6 +145,15 @@ TrajectoryPlanner::plan_route_trajectory_with_custom_comfort_settings( const map
 
   auto ref_traj = generate_trajectory_from_speed_profile( speed_profile, latest_route, current_state, dt );
 
+  if( ref_traj.states.size() < 1 )
+  {
+    dynamics::VehicleStateDynamic empty_state;
+    empty_state.x  = current_state.x;
+    empty_state.y  = current_state.y;
+    empty_state.vx = 0.0;
+    ref_traj.states.assign( 3, empty_state );
+  }
+
   // PID-based initial guess
   controllers::PurePursuit pid;
   pid.model        = dynamics::PhysicalVehicleModel();
@@ -177,13 +186,6 @@ TrajectoryPlanner::optimize_trajectory( const dynamics::VehicleStateDynamic& cur
   setup_problem();
   solve_problem();
   auto out_trajectory = extract_trajectory();
-  if( problem->best_cost > 30.0 && current_state.vx > 2.0 && counter < 15 )
-  {
-    counter++;
-    return previous_trajectory;
-  }
-  counter             = 0;
-  previous_trajectory = out_trajectory;
   return out_trajectory;
 }
 

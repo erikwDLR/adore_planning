@@ -82,12 +82,10 @@ private:
   double dt              = 0.1;
   size_t horizon_steps   = 40;
   double ref_traj_length = 100;
-  int    counter         = 0;
 
   std::shared_ptr<mas::OCP> problem;
   dynamics::Trajectory      reference_trajectory; // Reference trajectory for the planner
   dynamics::Trajectory      guess_trajectory;     // Reference trajectory for the planner
-  dynamics::Trajectory      previous_trajectory;  // Previously planned trajectory
 
   dynamics::VehicleStateDynamic start_state; // Current state of the vehicle
 

@@ -77,6 +77,18 @@ TrajectoryPlanner::set_vehicle_parameters( const dynamics::PhysicalVehicleParame
   vehicle_params = params;
 }
 
+void
+TrajectoryPlanner::set_allow_previous_trajectory_fallback( bool allow )
+{
+  allow_previous_trajectory_fallback = allow;
+}
+
+bool
+TrajectoryPlanner::get_allow_previous_trajectory_fallback() const
+{
+  return allow_previous_trajectory_fallback;
+}
+
 mas::MotionModel
 TrajectoryPlanner::get_planning_model( const dynamics::PhysicalVehicleParameters& params )
 {
@@ -204,7 +216,8 @@ TrajectoryPlanner::optimize_trajectory( const dynamics::VehicleStateDynamic& cur
   setup_problem();
   solve_problem();
   auto out_trajectory = extract_trajectory();
-  if( problem->best_cost > 30.0 && current_state.vx > 2.0 && counter < 15 )
+  if( allow_previous_trajectory_fallback &&
+      problem->best_cost > 30.0 && current_state.vx > 2.0 && counter < 15 )
   {
     counter++;
     std::fprintf(

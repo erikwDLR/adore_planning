@@ -12,8 +12,10 @@
 #include "planning/trajectory_planner.hpp"
 
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
+#include <array>
 
 namespace adore
 {
@@ -22,73 +24,98 @@ namespace planner
 
 struct ObstacleAvoidanceParams
 {
+  // --------------------------------------------------------------------------
+  // Public baseline parameters
+  // --------------------------------------------------------------------------
+
+  // Master enable/disable for obstacle avoidance.
+  bool enabled = true;
+
   // Maximum distance ahead of ego in which static obstacles are considered.
   double max_object_ahead             = 60.0;
   double max_static_object_speed      = 0.5;
-
-  // Safety distances around the detected raw obstacle footprint.
-  double side_clearance               = 0.4;
-  double front_clearance              = 2.0;
-  double rear_clearance               = 2.0;
-
 
   // Detection corridor: obstacle is relevant only if its raw footprint intersects
   // [-0.5 * ego_width - ego_corridor_safety_margin, +0.5 * ego_width + ego_corridor_safety_margin].
   double ego_corridor_safety_margin       = 0.2;
 
+  // Required lateral distance from the ego outer edge to the real obstacle
+  // outer edge. This is the only object clearance requirement.
+  double side_clearance               = 0.5;
+
+  // Longitudinal planning distances for stop/shift timing. These do not
+  // inflate stored obstacle geometry.
+  double front_clearance              = 4.0;
+  double rear_clearance               = 4.0;
+  double stop_before_obstacle         = 7.0;
+
+  // Allow lateral shifts within the current lane (without changing lanes).
+  bool in_lane_shift_enabled = true;
+
+  // Allow use of adjacent driving lanes in the same direction as the route.
+  bool adjacent_lane_enabled = true;
+
+  // Allow use of opposite-direction lanes (oncoming lanes). Requires special
+  // oncoming traffic checks. Should remain false for baseline tests.
+  bool opposite_lane_enabled = true; //false;
+
+  // Enable multi-obstacle clustering and hull-bridge behavior. If false, only
+  // the nearest ego-corridor obstacle is used for OA, with no cluster/hull link.
+  // If true, nearby ego-corridor obstacles form one maneuver while preserving
+  // their individual obstacle hulls.
+  bool clustering_enabled = true; //false;
+
+  // If enabled, a lateral-shift candidate is accepted only if the ego footprint
+  // remains inside the current route lane or, if the relevant mode switch is
+  // enabled, inside a connected corridor of driving lanes on the intended shift
+  // side.
+  bool enforce_drivable_area           = true;
+
+  // 0.0 disables speed capping
+  double max_speed_during_avoidance    = 2.7; // ~10 km/h
+
+  // Candidate generation.
+  bool validate_shifted_trajectory = true;
+  int lateral_candidate_extra_steps = 2;
+  double lateral_candidate_extra_step = 0.30;
+
+  // If enabled, every active OA lock is monitored against the route that ego is
+  // actually following.
+  bool modified_route_safety_check_enabled = true;
+  double modified_route_max_check_distance = 60.0;
+  double modified_route_time_horizon = 12.0;
+  bool stop_on_modified_route_conflict = true;
+
+  // --------------------------------------------------------------------------
+  // Internal/advanced parameters
+  // --------------------------------------------------------------------------
+
   // Plausibility filter for bad route projections / unrelated objects.
   double max_object_lateral_distance  = 8.0;
 
   double min_obstacle_route_overlap   = 0.5;
-  //double oncoming_lookahead_after_obj = 35.0;
   double min_oncoming_heading_diff    = 2.35; // rad, about 135 deg
   double stop_time_step               = 0.1;
 
-  double stop_distance_before_obstacle = 8.0;
-
-  // The route points are modified directly. These distances shape the x^5 transition.
-  double entry_extra_distance          = 10.0;
-  double return_extra_distance         = 10.0;
-
-  // 0.0 disables speed capping
-  double max_speed_during_avoidance    = 2.78;  // 10 km/h
-
   // If left and right are equally good, prefer left. This matches right-hand traffic overtaking behavior.
   bool prefer_left_shift               = true;
-
-  bool overtaking_allowed              = true;
-
-  // If enabled, a lateral-shift candidate is accepted only if the ego footprint
-  // remains inside the current route lane or, if overtaking is allowed, inside a
-  // connected corridor of driving lanes on the intended shift side.
-  bool enforce_drivable_area           = true;
-
-  // Additional lateral safety margin between ego footprint and lane boundary.
-  double drivable_area_margin          = 0.10;
-
-  // Small tolerance for numerically merging touching lane intervals.
-  double lane_boundary_join_slack      = 0.25;
 
   // Longitudinal tolerance for considering a neighbouring lane available at the
   // same lane-local s position. Prevents using a lane outside its actual s range.
   double lane_s_overlap_slack          = 0.50;
 
-  // If false, overtaking may only use driving lanes with the same direction as
-  // the route lane. If true, opposite-direction driving lanes of the same road
-  // may also be used, subject to the oncoming-traffic check.
-  bool allow_opposite_direction_lanes  = true;
-
   double max_projection_distance_from_route = 5.0;
 
-  // Multi-obstacle grouping.
+  // Advanced/internal multi-obstacle grouping. Used only when clustering_enabled
+  // is true.
   //
-  // obstacle_cluster_join_gap_s is the legacy geometric pre-clustering threshold.
-  // It should usually be close to cluster_hold_gap_s. In the current grouping
-  // logic the effective geometric join gap is bounded by cluster_hold_gap_s.
+  // Lookahead padding for finding related obstacles. Current grouping keeps
+  // individual obstacle hulls and does not pre-merge them geometrically.
   double obstacle_cluster_join_gap_s = 10.0;
 
   // Gap <= cluster_hold_gap_s:
-  //   hard-merge the obstacles and hold the full lateral shift through the gap.
+  //   keep individual obstacle hulls and connect their per-object lateral
+  //   shift targets directly. This is not a geometric rectangle merge.
   //
   // cluster_hold_gap_s < gap <= shift_hull_gap_s:
   //   keep the raw obstacle envelopes separate, but create one AvoidanceGroup
@@ -104,22 +131,11 @@ struct ObstacleAvoidanceParams
   // and avoids returning completely before the next obstacle.
   double min_alpha_between_hull_obstacles = 0.5;
 
-  // Generate and evaluate multiple route-shift variants instead of accepting
-  // the first feasible left/right shift. Variants add lateral clearance and can
-  // stretch the entry/return distances for smoother, more conservative motion.
+  // Internal switch for evaluating extra lateral shift variants.
   bool enable_multi_candidate_route_shift = true;
-  int lateral_candidate_extra_steps = 2;
-  double lateral_candidate_extra_step = 0.30;
-  double candidate_longitudinal_stretch_factor = 1.50;
-
-  // Hard validation of the planned trajectory after route shifting. This checks
-  // the actual optimized ego footprint against drivable lane intervals and the
-  // static obstacle envelope, not only the shifted reference line.
-  bool validate_shifted_trajectory = true;
-  double trajectory_validation_lateral_margin = 0.05;
 
   // ============================================================================
-  // Oncoming traffic gap-acceptance parameters (improved time-based check)
+  // Internal/advanced oncoming traffic gap-acceptance parameters.
   // ============================================================================
 
   // Minimum time margin before an oncoming vehicle arrives at the conflict area.
@@ -141,7 +157,7 @@ struct ObstacleAvoidanceParams
   double min_oncoming_route_speed = 1.0;
 
   // Time horizon for predicting participant trajectories. Limits lookahead.
-  double prediction_time_horizon = 12.0;
+  double prediction_time_horizon = 15.0;
 
   // Time step for sampling predicted trajectories (if available).
   //double prediction_time_step = 0.2;
@@ -156,7 +172,7 @@ struct ObstacleAvoidanceParams
   bool debug_oncoming_check = false;
 
   // ============================================================================
-  // Ego-lane oncoming stop behavior
+  // Internal/advanced ego-lane oncoming stop behavior.
   // ============================================================================
 
   // If enabled, dynamic participants that move against the ego route direction
@@ -167,11 +183,11 @@ struct ObstacleAvoidanceParams
 
   // Maximum longitudinal distance ahead of ego for considering an oncoming
   // participant on the ego lane relevant.
-  double ego_lane_oncoming_max_distance = 80.0;
+  double ego_lane_oncoming_max_distance = 100.0;
 
   // Maximum time-to-conflict for triggering the defensive stop. A value <= 0.0
   // disables the time filter and uses distance only.
-  double ego_lane_oncoming_time_horizon = 12.0;
+  double ego_lane_oncoming_time_horizon = 15.0;
 
   // Required route-aligned speed against the ego route direction.
   double ego_lane_oncoming_min_route_speed = 1.0;
@@ -183,6 +199,24 @@ struct ObstacleAvoidanceParams
   // Desired distance between the ego front and the nearest footprint point of
   // the oncoming participant when the ego vehicle comes to rest.
   double ego_lane_oncoming_stop_distance = 15.0;
+
+  // ============================================================================
+  // Internal/advanced active modified-route safety monitor parameters.
+  // ============================================================================
+
+  double modified_route_ttc_margin = 2.0;
+  double modified_route_stop_ttc_threshold = 5.0;
+  double modified_route_braking_safety_margin = 5.0;
+  double min_valid_stop_margin = 1.0;
+
+  // Ghost memory for obstacles that were relevant during an active OA lock.
+  double ghost_obstacle_hold_time = 2.0;
+  double ghost_obstacle_release_extra_s = 5.0;
+  double ghost_obstacle_match_s_margin = 3.0;
+  double ghost_obstacle_match_l_margin = 1.0;
+  double ghost_obstacle_max_lifetime = 10.0;
+  int ghost_dynamic_max_missing_cycles = 5;
+
 };
 
 
@@ -269,6 +303,98 @@ struct EgoLaneOncomingStopResult
   dynamics::Trajectory trajectory;
 };
 
+enum class RouteCorridorObjectClass
+{
+  StaticOrSlow,
+  Oncoming,
+  SameDirection,
+  CrossingOrUnknown
+};
+
+struct RouteCorridorConflict
+{
+  int participant_id = -1;
+  RouteCorridorObjectClass object_class = RouteCorridorObjectClass::CrossingOrUnknown;
+
+  double object_s_min = std::numeric_limits<double>::infinity();
+  double object_s_max = -std::numeric_limits<double>::infinity();
+  double object_l_min = std::numeric_limits<double>::infinity();
+  double object_l_max = -std::numeric_limits<double>::infinity();
+
+  double inflated_s_min = std::numeric_limits<double>::infinity();
+  double inflated_s_max = -std::numeric_limits<double>::infinity();
+  double inflated_l_min = std::numeric_limits<double>::infinity();
+  double inflated_l_max = -std::numeric_limits<double>::infinity();
+
+  double distance_s = std::numeric_limits<double>::infinity();
+  double time_to_conflict = std::numeric_limits<double>::infinity();
+
+  bool currently_overlaps_route_corridor = false;
+  bool currently_overlaps_ego_footprint = false;
+  bool predicted_spatiotemporal_conflict = false;
+  bool requires_stop = false;
+  bool allows_replan = true;
+
+  std::string ttc_source;
+
+  double object_center_x = std::numeric_limits<double>::quiet_NaN();
+  double object_center_y = std::numeric_limits<double>::quiet_NaN();
+  double object_yaw = 0.0;
+  double object_length = 0.1;
+  double object_width = 0.1;
+  std::array<double, 4> footprint_x{};
+  std::array<double, 4> footprint_y{};
+  bool has_world_footprint = false;
+
+  bool currently_inside_corridor = false;
+
+  std::string reason;
+};
+
+struct RouteCorridorCheckResult
+{
+  bool safe = true;
+  bool has_conflict = false;
+  double ego_s = std::numeric_limits<double>::quiet_NaN();
+  RouteCorridorConflict conflict;
+  std::string reason;
+};
+
+struct LockedObstacleEnvelope
+{
+  double object_s_min = std::numeric_limits<double>::infinity();
+  double object_s_max = -std::numeric_limits<double>::infinity();
+  double object_l_min = std::numeric_limits<double>::infinity();
+  double object_l_max = -std::numeric_limits<double>::infinity();
+
+  double inflated_s_min = std::numeric_limits<double>::infinity();
+  double inflated_s_max = -std::numeric_limits<double>::infinity();
+  double inflated_l_min = std::numeric_limits<double>::infinity();
+  double inflated_l_max = -std::numeric_limits<double>::infinity();
+
+  RouteCorridorObjectClass object_class = RouteCorridorObjectClass::CrossingOrUnknown;
+
+  double first_seen_time = std::numeric_limits<double>::quiet_NaN();
+  double last_seen_time = std::numeric_limits<double>::quiet_NaN();
+  int seen_count = 0;
+  double hold_until_s = std::numeric_limits<double>::infinity();
+  int consecutive_missing_cycles = 0;
+  bool hold_until_passed = false;
+  bool created_from_original_avoidance_obstacle = false;
+  bool created_from_active_route_conflict = false;
+  bool is_ghost = false;
+  int last_participant_id = -1;
+
+  double object_center_x = std::numeric_limits<double>::quiet_NaN();
+  double object_center_y = std::numeric_limits<double>::quiet_NaN();
+  double object_yaw = 0.0;
+  double object_length = 0.1;
+  double object_width = 0.1;
+  std::array<double, 4> footprint_x{};
+  std::array<double, 4> footprint_y{};
+  bool has_world_footprint = false;
+};
+
 struct ObstacleAvoidanceManeuver
 {
   bool active = false;
@@ -276,6 +402,9 @@ struct ObstacleAvoidanceManeuver
   ObstacleAvoidanceMode mode = ObstacleAvoidanceMode::None;
 
   int obstacle_id = -1;
+  std::vector<int> obstacle_ids;
+  double obstacle_s_min = std::numeric_limits<double>::infinity();
+  double obstacle_s_max = -std::numeric_limits<double>::infinity();
 
   double shift_start_s = 0.0;
   double plateau_start_s = 0.0;
@@ -324,6 +453,9 @@ struct ObstacleAvoidanceResult
   bool has_maneuver_bounds = false;
 
   int obstacle_id = -1;
+  std::vector<int> obstacle_ids;
+  double obstacle_s_min = std::numeric_limits<double>::infinity();
+  double obstacle_s_max = -std::numeric_limits<double>::infinity();
 
   double shift_start_s = 0.0;
   double plateau_start_s = 0.0;
@@ -349,6 +481,33 @@ try_plan_ego_lane_oncoming_stop( TrajectoryPlanner& planner,
                                  const dynamics::VehicleStateDynamic& ego,
                                  const dynamics::TrafficParticipantSet& traffic_participants,
                                  const ObstacleAvoidanceParams& params = {} );
+
+RouteCorridorCheckResult
+check_route_corridor_safety(
+  const map::Route& route_to_check,
+  const dynamics::VehicleStateDynamic& ego,
+  const dynamics::TrafficParticipantSet& traffic_participants,
+  const dynamics::PhysicalVehicleParameters& ego_params,
+  const ObstacleAvoidanceParams& params = {},
+  const dynamics::Trajectory* ego_trajectory = nullptr,
+  const std::vector<int>* ignored_participant_ids = nullptr );
+
+ObstacleAvoidanceResult
+plan_stop_on_route_before_corridor_conflict(
+  TrajectoryPlanner& planner,
+  const map::Route& active_route,
+  const dynamics::VehicleStateDynamic& ego,
+  const dynamics::TrafficParticipantSet& traffic_participants,
+  const RouteCorridorConflict& conflict,
+  const ObstacleAvoidanceParams& params = {} );
+
+bool
+trajectory_stops_before_conflict(
+  const dynamics::Trajectory& trajectory,
+  const map::Route& route,
+  const RouteCorridorConflict& conflict,
+  const dynamics::PhysicalVehicleParameters& ego_params,
+  const ObstacleAvoidanceParams& params = {} );
 
 ObstacleAvoidanceMonitorResult
 monitor_active_obstacle_avoidance_maneuver(

@@ -66,6 +66,8 @@ public:
   void set_parameters( const std::map<std::string, double>& params );
   void set_vehicle_parameters( const dynamics::PhysicalVehicleParameters& params );
   void set_comfort_settings( const dynamics::ComfortSettings& settings );
+  void set_allow_previous_trajectory_fallback( bool allow );
+  bool get_allow_previous_trajectory_fallback() const;
   dynamics::PhysicalVehicleParameters get_physical_vehicle_parameters();
 
 private:
@@ -92,6 +94,7 @@ private:
   size_t horizon_steps   = 40;
   double ref_traj_length = 100;
   int    counter         = 0;
+  bool   allow_previous_trajectory_fallback = true;
 
   std::shared_ptr<mas::OCP> problem;
   dynamics::Trajectory      reference_trajectory; // Reference trajectory for the planner

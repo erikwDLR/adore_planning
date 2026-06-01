@@ -217,6 +217,34 @@ struct ObstacleAvoidanceParams
   double ghost_obstacle_max_lifetime = 10.0;
   int ghost_dynamic_max_missing_cycles = 5;
 
+  // ============================================================================
+  // Internal/advanced trajectory and geometry parameters.
+  // ============================================================================
+
+  // Minimum vehicle dimension fallback when physical parameters are unavailable
+  // or invalid (e.g., body_length or body_width < this value). This prevents
+  // numerical issues in footprint calculations.
+  double min_vehicle_dimension = 0.1;
+
+  // Minimum search window for route projection. Prevents degenerate route segments.
+  double route_window_min = 20.0;
+
+  // Trajectory sampling step size for stop/hold trajectories. Controls granularity
+  // of state predictions during emergency deceleration.
+  double trajectory_step_size = 0.05;
+
+  // Minimum speed threshold for participant motion detection. Speeds below this
+  // are treated as static or negligible motion.
+  double min_motion_speed = 0.05;
+
+  // Adjustment offset added to front_clearance when stop_before_obstacle < front_clearance.
+  // Ensures minimum safety distance to obstacles during emergency stop.
+  double stop_adjustment_offset = 2.0;
+
+  // Lateral shift penalty score for non-in-lane candidates. Higher values penalize
+  // lane-change maneuvers, encouraging in-lane solutions when available.
+  double lateral_shift_penalty_score = 20.0;
+
 };
 
 

@@ -53,6 +53,7 @@ project_s_on_reference_line(
 
   const double first_s = route.reference_line.begin()->first;
   const double last_s = route.reference_line.rbegin()->first;
+  // NOTE: Min route window size (20.0) should be configurable via ObstacleAvoidanceParams::route_window_min
   const double route_window = std::max( 20.0, last_s - first_s );
   const double coarse_s =
     std::isfinite( hint_s )
@@ -293,7 +294,7 @@ is_oncoming_other_lane_conflict(
   }
 
   const double ego_half_width =
-    0.5 * std::max( 0.1, ego_params.body_width );
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width ); // min_vehicle_dimension from params
   const double actual_clearance =
     actual_lateral_clearance_to_centered_ego(
       conflict.object_l_min,
@@ -311,7 +312,7 @@ normalized_stop_before_obstacle( const ObstacleAvoidanceParams& params )
     return params.stop_before_obstacle;
   }
 
-  const double adjusted = params.front_clearance + 2.0;
+  const double adjusted = params.front_clearance + params.stop_adjustment_offset;
   std::fprintf(
     stderr,
     "[OA][CONFIG] stop_before_obstacle must be greater than front_clearance; adjusted from %.2f to %.2f\n",
@@ -543,6 +544,7 @@ make_hard_stop_trajectory( const dynamics::VehicleStateDynamic& ego,
   trajectory.label = "obstacle avoidance: immediate hold";
 
   const double step = std::max( 0.05, dt );
+  // NOTE: Trajectory step size (0.05) should be configurable via ObstacleAvoidanceParams::trajectory_step_size
   const double start_speed = std::max( 0.0, ego.vx );
   const int samples = 6;
 
@@ -571,6 +573,7 @@ fill_world_footprint_from_participant( RouteCorridorConflict& conflict,
   conflict.object_center_x = participant.state.x;
   conflict.object_center_y = participant.state.y;
   conflict.object_yaw = participant.state.yaw_angle;
+  // NOTE: Min vehicle dimension (0.1) should be configurable via ObstacleAvoidanceParams::min_vehicle_dimension
   conflict.object_length =
     std::max( 0.1, participant.physical_parameters.body_length );
   conflict.object_width =
@@ -642,6 +645,7 @@ build_stop_route_before_obstacle(
   /*
    * acceleration_min is defined in the vehicle parameter file, e.g. NGC.json.
    * It is expected to be negative, for example -1.5 m/s².
+   * NOTE: Fallback value (0.1) should be configurable via ObstacleAvoidanceParams::min_motion_speed
    */
   const double braking_deceleration =
     std::max( 0.1, std::fabs( vehicle_params.acceleration_min ) );
@@ -799,10 +803,10 @@ project_obstacle_to_route_analytic( const map::Route& route,
   const double sin_yaw = std::sin( yaw );
 
   const double half_length =
-    0.5 * std::max( 0.1, participant.physical_parameters.body_length );
+    0.5 * std::max( params.min_vehicle_dimension, participant.physical_parameters.body_length );
 
   const double half_width =
-    0.5 * std::max( 0.1, participant.physical_parameters.body_width );
+    0.5 * std::max( params.min_vehicle_dimension, participant.physical_parameters.body_width );
 
   const std::array<std::pair<double, double>, 4> local_corners = {{
     { -half_length, -half_width },
@@ -1236,6 +1240,7 @@ find_static_obstacle_group_on_route(
           participant,
           params.max_static_object_speed,
           1.0 ) ||
+        // NOTE: Min motion speed threshold (0.05) should be configurable via ObstacleAvoidanceParams::min_motion_speed
         ( std::fabs( participant.state.vx ) > 0.05 &&
           participant_is_slow_opposite_direction_traffic(
             route,
@@ -4237,6 +4242,7 @@ score_route_shift_candidate( const RouteShiftPlanCandidate& candidate )
   // Hard safety checks have already accepted the candidate; scoring is for
   // choosing the least intrusive accepted maneuver.
   score += std::fabs( candidate.shift_candidate.shift );
+  // NOTE: Lateral shift penalty (20.0) should be configurable via ObstacleAvoidanceParams::lateral_shift_penalty_score
   score += candidate.shift_candidate.in_lane ? 0.0 : 20.0;
   score += candidate.uses_opposite_lane ? 40.0 : 0.0;
   score -= 0.5 * std::max( 0.0, candidate.validation.min_lane_margin );
@@ -4635,6 +4641,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           candidate.modified_route,
           ego,
           ego_s_original,
+          // NOTE: Route search window (20.0) should be configurable via ObstacleAvoidanceParams::route_window_min
           20.0 );
 
       if( !std::isfinite( candidate.ego_s_modified ) )

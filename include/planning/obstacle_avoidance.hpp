@@ -79,7 +79,7 @@ struct ObstacleAvoidanceParams
   int lateral_candidate_extra_steps = 2;
   double lateral_candidate_extra_step = 0.30;
 
-  // If enabled, every active OA lock is monitored against the route that ego is
+  // If enabled, every active avoidance state is monitored against the route that ego is
   // actually following.
   bool modified_route_safety_check_enabled = true;
   double modified_route_max_check_distance = 60.0;
@@ -104,15 +104,15 @@ struct ObstacleAvoidanceParams
   // same lane-local s position. Prevents using a lane outside its actual s range.
   double lane_s_overlap_slack          = 0.50;
 
+  // Lateral tolerance for joining adjacent lane-border intervals into one
+  // connected drivable area. Small map gaps below this value are ignored.
+  double lane_boundary_join_slack      = 0.25;
+
   double max_projection_distance_from_route = 5.0;
 
   // Advanced/internal multi-obstacle grouping. Used only when clustering_enabled
   // is true.
   //
-  // Lookahead padding for finding related obstacles. Current grouping keeps
-  // individual obstacle hulls and does not pre-merge them geometrically.
-  double obstacle_cluster_join_gap_s = 10.0;
-
   // Gap <= cluster_hold_gap_s:
   //   keep individual obstacle hulls and connect their per-object lateral
   //   shift targets directly. This is not a geometric rectangle merge.
@@ -209,7 +209,7 @@ struct ObstacleAvoidanceParams
   double modified_route_braking_safety_margin = 5.0;
   double min_valid_stop_margin = 1.0;
 
-  // Ghost memory for obstacles that were relevant during an active OA lock.
+  // Ghost memory for obstacles that were relevant during an active avoidance state.
   double ghost_obstacle_hold_time = 2.0;
   double ghost_obstacle_release_extra_s = 5.0;
   double ghost_obstacle_match_s_margin = 3.0;
@@ -388,7 +388,7 @@ struct RouteCorridorCheckResult
   std::string reason;
 };
 
-struct LockedObstacleEnvelope
+struct ObstacleGhostEnvelope
 {
   double object_s_min = std::numeric_limits<double>::infinity();
   double object_s_max = -std::numeric_limits<double>::infinity();

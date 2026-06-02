@@ -27,9 +27,6 @@ namespace planner
 namespace
 {
 
-constexpr double kDrivableAreaMargin = 0.0;
-constexpr double kLaneBoundaryJoinSlack = 0.25;
-
 struct RouteFrame
 {
   double x = 0.0;
@@ -360,6 +357,12 @@ AvoidanceAlphaSample
 avoidance_shift_alpha_at_s( double s,
                             const AvoidanceGroup& group,
                             const ObstacleAvoidanceParams& params );
+
+double
+hard_bridge_alpha_at_s( double s,
+                        const ObstacleEnvelope& previous,
+                        const ObstacleEnvelope& next,
+                        const ObstacleAvoidanceParams& params );
 
 double
 avoidance_shift_offset_at_s(
@@ -1222,7 +1225,7 @@ find_static_obstacle_group_on_route(
   const double cluster_search_end_s =
     search_end_s +
     std::max(
-      std::max( 0.0, params.obstacle_cluster_join_gap_s ),
+      std::max( 0.0, params.cluster_hold_gap_s ),
       std::max( 0.0, params.shift_hull_gap_s ) ) +
     params.front_clearance +
     params.rear_clearance;
@@ -1817,14 +1820,10 @@ compute_opposite_lane_conflict_interval(
 
     found_active_sample = true;
 
-    // Use the outer ego edge, not only the reference point. The drivable-area
-    // margin makes the interval slightly conservative and avoids flickering at
-    // the lane boundary.
-    const double ego_left_l =
-      center_l + ego_half_width + kDrivableAreaMargin;
+    // Use the outer ego edge, not only the reference point.
+    const double ego_left_l = center_l + ego_half_width;
 
-    const double ego_right_l =
-      center_l - ego_half_width - kDrivableAreaMargin;
+    const double ego_right_l = center_l - ego_half_width;
 
     const auto opposite_query =
       query_opposite_direction_lateral_interval_at_route_point(
@@ -2601,21 +2600,41 @@ avoidance_shift_alpha_at_s( double s,
   if( ( group.uses_hull_curve || group.hard_merged ) &&
       group.obstacles.size() >= 2 )
   {
+    const double hard_merge_gap_s =
+      std::max( 0.0, params.cluster_hold_gap_s );
+    const double shift_hull_gap_s =
+      std::max( hard_merge_gap_s, params.shift_hull_gap_s );
+
     for( std::size_t i = 1; i < group.obstacles.size(); ++i )
     {
       const auto& previous = group.obstacles[i - 1];
       const auto& next = group.obstacles[i];
 
       const double raw_gap_s = next.object_s_min - previous.object_s_max;
-      if( raw_gap_s > params.shift_hull_gap_s )
+      if( raw_gap_s > shift_hull_gap_s )
       {
         continue;
       }
 
+      if( raw_gap_s <= hard_merge_gap_s )
+      {
+        const double bridge_alpha =
+          hard_bridge_alpha_at_s( s, previous, next, params );
+        if( bridge_alpha <= 0.0 )
+        {
+          continue;
+        }
+
+        if( bridge_alpha > sample.alpha )
+        {
+          sample.alpha = bridge_alpha;
+          sample.source = "hard_bridge";
+        }
+        continue;
+      }
+
       const double bridge_floor =
-        raw_gap_s <= params.cluster_hold_gap_s
-          ? 1.0
-          : std::clamp( params.min_alpha_between_hull_obstacles, 0.0, 1.0 );
+        std::clamp( params.min_alpha_between_hull_obstacles, 0.0, 1.0 );
 
       const double bridge_start_s =
         previous.object_s_max + params.rear_clearance;
@@ -2699,6 +2718,39 @@ choose_larger_magnitude_shift( double a, double b )
 }
 
 double
+hard_bridge_alpha_at_s( double s,
+                        const ObstacleEnvelope& previous,
+                        const ObstacleEnvelope& next,
+                        const ObstacleAvoidanceParams& params )
+{
+  const double bridge_start_s =
+    std::max( 0.0, previous.object_s_min - std::max( 0.0, params.front_clearance ) );
+  const double bridge_end_s =
+    next.object_s_max + std::max( 0.0, params.rear_clearance );
+
+  if( s < bridge_start_s || s > bridge_end_s )
+  {
+    return 0.0;
+  }
+
+  if( s < previous.object_s_min )
+  {
+    return smoothstep01(
+      ( s - bridge_start_s ) /
+      std::max( 0.1, previous.object_s_min - bridge_start_s ) );
+  }
+
+  if( s > next.object_s_max )
+  {
+    return 1.0 - smoothstep01(
+      ( s - next.object_s_max ) /
+      std::max( 0.1, bridge_end_s - next.object_s_max ) );
+  }
+
+  return 1.0;
+}
+
+double
 avoidance_shift_offset_at_s(
   double s,
   const AvoidanceGroup& group,
@@ -2728,24 +2780,18 @@ avoidance_shift_offset_at_s(
   if( ( group.uses_hull_curve || group.hard_merged ) &&
       group.obstacles.size() >= 2 )
   {
+    const double hard_merge_gap_s =
+      std::max( 0.0, params.cluster_hold_gap_s );
+    const double shift_hull_gap_s =
+      std::max( hard_merge_gap_s, params.shift_hull_gap_s );
+
     for( std::size_t i = 1; i < group.obstacles.size(); ++i )
     {
       const auto& previous = group.obstacles[i - 1];
       const auto& next = group.obstacles[i];
 
       const double raw_gap_s = next.object_s_min - previous.object_s_max;
-      if( raw_gap_s > params.shift_hull_gap_s )
-      {
-        continue;
-      }
-
-      const double bridge_start_s =
-        previous.object_s_max + params.rear_clearance;
-      const double bridge_end_s =
-        std::max( bridge_start_s, next.object_s_min - params.front_clearance );
-
-      if( s < bridge_start_s || s > bridge_end_s ||
-          bridge_end_s <= bridge_start_s + 0.1 )
+      if( raw_gap_s > shift_hull_gap_s )
       {
         continue;
       }
@@ -2763,6 +2809,36 @@ avoidance_shift_offset_at_s(
           ego_params,
           params );
 
+      if( raw_gap_s <= hard_merge_gap_s )
+      {
+        const double bridge_alpha =
+          hard_bridge_alpha_at_s( s, previous, next, params );
+        if( bridge_alpha <= 0.0 )
+        {
+          continue;
+        }
+
+        // Hard clusters keep the larger required per-object shift through the
+        // bridge. If the next object needs more shift, ego is already in place;
+        // if it needs less, ego avoids an unnecessary return steering input.
+        const double bridge_offset =
+          choose_larger_magnitude_shift( previous_shift, next_shift ) *
+          bridge_alpha;
+        offset = choose_larger_magnitude_shift( offset, bridge_offset );
+        continue;
+      }
+
+      const double bridge_start_s =
+        previous.object_s_max + params.rear_clearance;
+      const double bridge_end_s =
+        std::max( bridge_start_s, next.object_s_min - params.front_clearance );
+
+      if( s < bridge_start_s || s > bridge_end_s ||
+          bridge_end_s <= bridge_start_s + 0.1 )
+      {
+        continue;
+      }
+
       const double t =
         std::clamp(
           ( s - bridge_start_s ) / ( bridge_end_s - bridge_start_s ),
@@ -2772,7 +2848,6 @@ avoidance_shift_offset_at_s(
         previous_shift +
         ( next_shift - previous_shift ) * smoothstep01( t );
 
-      if( raw_gap_s > params.cluster_hold_gap_s )
       {
         const double bridge_floor =
           std::clamp( params.min_alpha_between_hull_obstacles, 0.0, 1.0 ) *
@@ -2995,7 +3070,8 @@ get_allowed_lateral_interval_at_route_point(
   for( const auto& interval : intervals )
   {
     if( merged.empty() ||
-        interval.min_l > merged.back().max_l + kLaneBoundaryJoinSlack )
+        interval.min_l >
+          merged.back().max_l + std::max( 0.0, params.lane_boundary_join_slack ) )
     {
       merged.push_back( interval );
     }
@@ -3225,8 +3301,8 @@ candidate_respects_drivable_area( const map::Route& route,
       continue;
     }
 
-    const double ego_min_l = center_l - ego_half_width - kDrivableAreaMargin;
-    const double ego_max_l = center_l + ego_half_width + kDrivableAreaMargin;
+    const double ego_min_l = center_l - ego_half_width;
+    const double ego_max_l = center_l + ego_half_width;
 
     const auto allowed_interval = get_allowed_lateral_interval_at_route_point(
       route,
@@ -3261,7 +3337,7 @@ candidate_respects_drivable_area( const map::Route& route,
         allowed_interval->max_l,
         allow_adjacent_driving_lanes ? "true" : "false",
         ego_params.body_width,
-        kDrivableAreaMargin,
+        0.0,
         route_point.parent_id );
       std::fflush( stderr );
 
@@ -3503,8 +3579,8 @@ candidate_respects_opposite_direction_area(
       continue;
     }
 
-    const double ego_min_l = center_l - ego_half_width - kDrivableAreaMargin;
-    const double ego_max_l = center_l + ego_half_width + kDrivableAreaMargin;
+    const double ego_min_l = center_l - ego_half_width;
+    const double ego_max_l = center_l + ego_half_width;
 
     const auto opposite_query =
       query_opposite_direction_lateral_interval_at_route_point(
@@ -3777,7 +3853,7 @@ generate_opposite_lane_candidate_variants(
   }
 
   const double ego_half_width = 0.5 * std::max( 0.1, ego_params.body_width );
-  const double required_lane_margin = kDrivableAreaMargin;
+  const double required_lane_margin = 0.0;
 
   const std::array<double, 3> sample_s_values = {{
     group.envelope.object_s_min,
@@ -4137,10 +4213,8 @@ validate_planned_shift_trajectory(
       return result;
     }
 
-    const double lane_ego_min_l =
-      state_l - ego_half_width - kDrivableAreaMargin;
-    const double lane_ego_max_l =
-      state_l + ego_half_width + kDrivableAreaMargin;
+    const double lane_ego_min_l = state_l - ego_half_width;
+    const double lane_ego_max_l = state_l + ego_half_width;
 
     const double lane_margin =
       std::min( lane_ego_min_l - allowed_interval->min_l,

@@ -606,13 +606,134 @@ fill_world_footprint_from_participant( RouteCorridorConflict& conflict,
   conflict.has_world_footprint = true;
 }
 
+void
+set_route_points_from_s_to_zero( map::Route& route, double ego_s )
+{
+  if( route.reference_line.empty() )
+  {
+    return;
+  }
+
+  if( !std::isfinite( ego_s ) )
+  {
+    ego_s = route.reference_line.begin()->first;
+  }
+
+  for( auto& [s, point] : route.reference_line )
+  {
+    if( s >= ego_s )
+    {
+      point.max_speed = 0.0;
+    }
+  }
+}
+
+void
+insert_zero_speed_stop_point( map::Route& route, double stop_s )
+{
+  if( route.reference_line.empty() || !std::isfinite( stop_s ) )
+  {
+    return;
+  }
+
+  const double first_s = route.reference_line.begin()->first;
+  const double last_s = route.reference_line.rbegin()->first;
+  if( stop_s < first_s || stop_s > last_s )
+  {
+    return;
+  }
+
+  auto stop_point = route.interpolate_at_s<map::MapPoint>( stop_s );
+  stop_point.s = stop_s;
+  stop_point.max_speed = 0.0;
+  route.reference_line[stop_s] = stop_point;
+}
+
+void
+apply_avoidance_speed_profile( map::Route& route,
+                               double ego_s,
+                               double shift_start_s,
+                               double maneuver_end_s,
+                               const dynamics::PhysicalVehicleParameters& vehicle_params,
+                               const ObstacleAvoidanceParams& params )
+{
+  if( params.max_speed_during_avoidance <= 0.0 ||
+      !std::isfinite( ego_s ) ||
+      !std::isfinite( shift_start_s ) )
+  {
+    return;
+  }
+
+  if( !std::isfinite( maneuver_end_s ) )
+  {
+    maneuver_end_s = shift_start_s;
+  }
+  maneuver_end_s = std::max( maneuver_end_s, shift_start_s );
+
+  const double target_v = std::max( 0.0, params.max_speed_during_avoidance );
+  const double a_abs =
+    std::max( 0.1, std::fabs( vehicle_params.acceleration_min ) );
+  std::size_t approach_points = 0;
+  std::size_t capped_points = 0;
+
+  for( auto& [s, point] : route.reference_line )
+  {
+    if( s < ego_s )
+    {
+      continue;
+    }
+
+    if( s < shift_start_s )
+    {
+      const double distance_to_target = shift_start_s - s;
+      const double allowed_speed =
+        std::sqrt(
+          target_v * target_v +
+          2.0 * a_abs * std::max( 0.0, distance_to_target ) );
+      point.max_speed =
+        std::min(
+          point.max_speed.value_or( std::numeric_limits<double>::infinity() ),
+          allowed_speed );
+      ++approach_points;
+      continue;
+    }
+
+    if( s <= maneuver_end_s )
+    {
+      point.max_speed =
+        std::min(
+          point.max_speed.value_or( std::numeric_limits<double>::infinity() ),
+          target_v );
+      ++capped_points;
+    }
+  }
+
+  std::fprintf(
+    stderr,
+    "[OA][SPEED_PROFILE] avoidance speed approach profile to shift_start_s ego_s=%.2f shift_start_s=%.2f target_v=%.2f a_abs=%.2f points=%zu\n",
+    ego_s,
+    shift_start_s,
+    target_v,
+    a_abs,
+    approach_points );
+  std::fprintf(
+    stderr,
+    "[OA][SPEED_PROFILE] avoidance speed cap inside maneuver shift_start_s=%.2f maneuver_end_s=%.2f max_speed=%.2f points=%zu\n",
+    shift_start_s,
+    maneuver_end_s,
+    target_v,
+    capped_points );
+  std::fflush( stderr );
+}
+
 map::Route
 build_stop_route_before_obstacle(
   const map::Route& route,
   const ObstacleEnvelope& obstacle,
   const dynamics::VehicleStateDynamic& ego,
   const dynamics::PhysicalVehicleParameters& vehicle_params,
-  double stop_before_obstacle )
+  double stop_before_obstacle,
+  double safety_margin = 0.0 )
 {
   map::Route stop_route = route;
 
@@ -628,15 +749,20 @@ build_stop_route_before_obstacle(
     return stop_route;
   }
 
-  const double stop_s =
+  const double ego_front_offset =
+    vehicle_params.wheelbase + vehicle_params.front_axle_to_front_border;
+  const double front_stop_s =
     obstacle.object_s_min
     - stop_before_obstacle;
+  const double stop_s =
+    front_stop_s
+    - ego_front_offset;
 
   if( !std::isfinite( stop_s ) )
   {
     std::fprintf(
       stderr,
-      "[OA] stop route: invalid stop_s, object_s_min=%.2f stop_distance=%.2f front_offset=%.2f\n",
+      "[OA] stop route: invalid reference stop_s, object_s_min=%.2f stop_distance=%.2f front_offset=%.2f\n",
       obstacle.object_s_min,
       stop_before_obstacle,
       vehicle_params.wheelbase + vehicle_params.front_axle_to_front_border );
@@ -666,18 +792,49 @@ build_stop_route_before_obstacle(
    * If the desired stop point is already behind or at the ego reference point,
    * command zero speed from the current ego position onward.
    */
-  if( available_distance <= 0.0 )
+  const double reachability_margin = std::max( 0.0, safety_margin );
+  const double close_stop_hold_margin =
+    std::max( 0.25, std::min( 1.0, std::max( 0.0, safety_margin ) ) );
+  const double hard_reachability_margin =
+    current_speed > 0.5
+      ? reachability_margin
+      : close_stop_hold_margin;
+
+  if( available_distance <= 0.0 ||
+      available_distance < required_braking_distance + hard_reachability_margin )
   {
-    for( auto& [s, point] : stop_route.reference_line )
-    {
-      if( s >= ego_s )
-      {
-        point.max_speed = 0.0;
-      }
-    }
+    std::fprintf(
+      stderr,
+      "[OA][STOP_ROUTE] requested stop unreachable; applying maximum route-based braking ego_s=%.2f reference_stop_s=%.2f front_stop_s=%.2f object_s_min=%.2f v=%.2f available=%.2f required=%.2f safety_margin=%.2f reachability_margin=%.2f\n",
+      ego_s,
+      stop_s,
+      front_stop_s,
+      obstacle.object_s_min,
+      current_speed,
+      available_distance,
+      required_braking_distance,
+      reachability_margin,
+      hard_reachability_margin );
+    std::fflush( stderr );
+    set_route_points_from_s_to_zero( stop_route, ego_s );
 
     return stop_route;
   }
+
+  std::fprintf(
+    stderr,
+    "[OA][STOP_ROUTE] building reachable stop profile ego_s=%.2f reference_stop_s=%.2f front_stop_s=%.2f object_s_min=%.2f v=%.2f braking_distance=%.2f safety_margin=%.2f reachability_margin=%.2f\n",
+    ego_s,
+    stop_s,
+    front_stop_s,
+    obstacle.object_s_min,
+    current_speed,
+    required_braking_distance,
+    reachability_margin,
+    hard_reachability_margin );
+  std::fflush( stderr );
+
+  insert_zero_speed_stop_point( stop_route, stop_s );
   
   /*
    * Start braking as late as physically possible under the selected deceleration.
@@ -4338,6 +4495,7 @@ map::Route
 build_modified_avoidance_route( const map::Route& route,
                                 const AvoidanceGroup& group,
                                 double lateral_shift,
+                                double ego_s,
                                 const dynamics::PhysicalVehicleParameters& ego_params,
                                 const ObstacleAvoidanceParams& params )
 {
@@ -4380,22 +4538,21 @@ build_modified_avoidance_route( const map::Route& route,
 
   }
 
-  if( params.max_speed_during_avoidance > 0.0 )
-  {
-    for( auto& route_point : modified_route.reference_line )
-    {
-      auto& point = route_point.second;
-      point.max_speed = std::min(
-        point.max_speed.value_or( params.max_speed_during_avoidance ),
-        params.max_speed_during_avoidance );
-    }
-
-    std::fprintf(
-      stderr,
-      "[OA][SPEED_CAP] capped modified_route max_speed to %.2f\n",
-      params.max_speed_during_avoidance );
-    std::fflush( stderr );
-  }
+  const double shift_start_s =
+    std::max(
+      0.0,
+      group.envelope.object_s_min -
+      std::max( 0.0, params.front_clearance ) );
+  const double shift_end_s =
+    group.envelope.object_s_max +
+    std::max( 0.0, params.rear_clearance );
+  apply_avoidance_speed_profile(
+    modified_route,
+    ego_s,
+    shift_start_s,
+    shift_end_s,
+    ego_params,
+    params );
 
   return modified_route;
 }
@@ -4440,17 +4597,29 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     stop_result.reason = reason;
 
     const auto& stop_obstacle = obstacle_group->obstacles.front();
+    stop_result.obstacle_id = stop_obstacle.id;
+    stop_result.obstacle_ids =
+      obstacle_group->envelope.participant_ids.empty()
+        ? stop_obstacle.participant_ids
+        : obstacle_group->envelope.participant_ids;
+    stop_result.obstacle_s_min = stop_obstacle.object_s_min;
+    stop_result.obstacle_s_max = stop_obstacle.object_s_max;
     const double shift_start_s =
       std::max( 0.0, stop_obstacle.object_s_min - std::max( 0.0, params.front_clearance ) );
     const double stop_before_obstacle =
       normalized_stop_before_obstacle( params );
-    const double stop_s =
+    const double ego_front_offset =
+      vehicle_params.wheelbase + vehicle_params.front_axle_to_front_border;
+    const double front_stop_s =
       stop_obstacle.object_s_min - std::max( 0.0, stop_before_obstacle );
+    const double stop_s =
+      front_stop_s - ego_front_offset;
 
     std::fprintf(
       stderr,
-      "[OA][WAIT_BEFORE_OVERTAKE] stop_s=%.2f shift_start_s=%.2f object_s_min=%.2f reason=%s\n",
+      "[OA][WAIT_BEFORE_OVERTAKE] reference_stop_s=%.2f front_stop_s=%.2f shift_start_s=%.2f object_s_min=%.2f reason=%s\n",
       stop_s,
+      front_stop_s,
       shift_start_s,
       stop_obstacle.object_s_min,
       reason.c_str() );
@@ -4462,7 +4631,9 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
         stop_obstacle,
         ego,
         vehicle_params,
-        stop_before_obstacle );
+        stop_before_obstacle,
+        std::max( 0.0, params.modified_route_braking_safety_margin ) +
+        std::max( 0.0, params.min_valid_stop_margin ) );
 
     const bool previous_fallback_allowed =
       planner.get_allow_previous_trajectory_fallback();
@@ -4482,7 +4653,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     {
       std::fprintf(
         stderr,
-        "[OA][STOP_ROUTE] planner exception; keeping stop route without free-space fallback: %s\n",
+        "[OA][STOP_ROUTE] planner exception on stop route: %s\n",
         e.what() );
       std::fflush( stderr );
     }
@@ -4492,7 +4663,46 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     {
       std::fprintf(
         stderr,
-        "[OA][STOP_ROUTE] planner returned empty trajectory; keeping stop route without free-space fallback\n" );
+        "[OA][STOP_ROUTE] invalid stop trajectory; retrying with maximum route-based braking\n" );
+      std::fflush( stderr );
+
+      stop_result.modified_route = route;
+      set_route_points_from_s_to_zero(
+        stop_result.modified_route,
+        project_s_on_reference_line( route, ego, stop_s ) );
+
+      planner.set_allow_previous_trajectory_fallback( false );
+      try
+      {
+        stop_result.trajectory = planner.plan_route_trajectory(
+          stop_result.modified_route,
+          ego,
+          traffic_participants );
+      }
+      catch( const std::exception& e )
+      {
+        std::fprintf(
+          stderr,
+          "[OA][STOP_ROUTE] planner exception on maximum route-based braking: %s\n",
+          e.what() );
+        std::fflush( stderr );
+      }
+      planner.set_allow_previous_trajectory_fallback( previous_fallback_allowed );
+
+      if( stop_result.trajectory.states.empty() )
+      {
+        stop_result.success = false;
+        stop_result.reason = "OA stop route planning failed";
+        std::fprintf(
+          stderr,
+          "[OA][STOP_ROUTE] maximum route-based braking failed; no valid route trajectory\n" );
+        std::fflush( stderr );
+        return stop_result;
+      }
+
+      std::fprintf(
+        stderr,
+        "[OA][STOP_ROUTE] maximum route-based braking trajectory accepted\n" );
       std::fflush( stderr );
     }
 
@@ -4707,6 +4917,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           route,
           obstacle_group.value(),
           candidate.shift_candidate.shift,
+          ego_s_original,
           vehicle_params,
           candidate.params );
 
@@ -5313,7 +5524,9 @@ try_plan_ego_lane_oncoming_stop( TrajectoryPlanner& planner,
     pseudo_obstacle,
     ego,
     vehicle_params,
-    params.ego_lane_oncoming_stop_distance );
+    params.ego_lane_oncoming_stop_distance,
+    std::max( 0.0, params.modified_route_braking_safety_margin ) +
+    std::max( 0.0, params.min_valid_stop_margin ) );
 
   const bool previous_fallback_allowed =
     planner.get_allow_previous_trajectory_fallback();
@@ -5842,11 +6055,13 @@ trajectory_stops_before_conflict(
 
   const double ego_front_offset =
     ego_params.wheelbase + ego_params.front_axle_to_front_border;
-  const double stop_front_s =
+  const double front_stop_s =
     conflict.object_s_min - std::max( 0.0, normalized_stop_before_obstacle( params ) );
-  const double conflict_entry_s =
-    std::min( conflict.object_s_min, conflict.inflated_s_min );
+  const double stop_s =
+    front_stop_s - ego_front_offset;
+  const double collision_entry_s = conflict.object_s_min;
   constexpr double stopped_speed = 0.20;
+  (void)params;
 
   bool saw_state_before_conflict = false;
   double min_speed_before_conflict = std::numeric_limits<double>::infinity();
@@ -5863,19 +6078,19 @@ trajectory_stops_before_conflict(
     const double ego_front_s = state_s + ego_front_offset;
     const double speed = std::fabs( state.vx );
 
-    if( ego_front_s < conflict_entry_s )
+    if( ego_front_s < collision_entry_s )
     {
       saw_state_before_conflict = true;
       min_speed_before_conflict =
         std::min( min_speed_before_conflict, speed );
     }
 
-    if( ego_front_s >= conflict_entry_s && speed > stopped_speed )
+    if( ego_front_s >= collision_entry_s && speed > stopped_speed )
     {
       return false;
     }
 
-    if( ego_front_s >= stop_front_s + 0.25 && speed > stopped_speed )
+    if( state_s >= stop_s && speed > stopped_speed )
     {
       return false;
     }
@@ -5890,8 +6105,13 @@ trajectory_stops_before_conflict(
   }
 
   const double final_front_s = final_s + ego_front_offset;
+  if( final_s < stop_s )
+  {
+    return final_front_s < collision_entry_s;
+  }
+
   const bool final_before_conflict =
-    final_front_s <= stop_front_s + 0.50;
+    final_front_s <= collision_entry_s;
   const bool final_stopped =
     std::fabs( final_state.vx ) <= stopped_speed;
   const bool stopped_before_conflict =
@@ -5927,19 +6147,34 @@ plan_stop_on_route_before_corridor_conflict(
   pseudo_obstacle.object_l_max = conflict.object_l_max;
 
   const double ego_s = project_s_on_reference_line( active_route, ego, conflict.object_s_min );
-  const double stop_s =
+  const double ego_front_offset =
+    vehicle_params.wheelbase + vehicle_params.front_axle_to_front_border;
+  const double front_stop_s =
     conflict.object_s_min -
     std::max( 0.0, normalized_stop_before_obstacle( params ) );
+  const double stop_s =
+    front_stop_s - ego_front_offset;
   const double deceleration =
     std::max( 0.1, std::fabs( vehicle_params.acceleration_min ) );
   const double required_braking_distance =
     std::max( 0.0, ego.vx ) * std::max( 0.0, ego.vx ) /
     ( 2.0 * deceleration );
   const double available_stop_distance = stop_s - ego_s;
-  const double required_stop_distance =
-    required_braking_distance +
+  const double stop_safety_margin =
     std::max( 0.0, params.modified_route_braking_safety_margin ) +
     std::max( 0.0, params.min_valid_stop_margin );
+  const double stop_reachability_margin =
+    std::max( 0.0, ego.vx ) > 0.5
+      ? stop_safety_margin
+      : 0.0;
+  const double required_stop_distance =
+    required_braking_distance +
+    stop_reachability_margin;
+  const bool requested_stop_reachable =
+    std::isfinite( ego_s ) &&
+    std::isfinite( stop_s ) &&
+    stop_s > ego_s &&
+    available_stop_distance >= required_stop_distance;
 
   if( !std::isfinite( ego_s ) ||
       !std::isfinite( stop_s ) ||
@@ -5948,15 +6183,19 @@ plan_stop_on_route_before_corridor_conflict(
   {
     std::fprintf(
       stderr,
-      "[OA][STOP_ROUTE] requested stop unreachable; braking on active route instead reason=%s ego_s=%.2f stop_s=%.2f v=%.2f available=%.2f required=%.2f\n",
+      "[OA][STOP_ROUTE] requested stop unreachable; applying maximum route-based braking reason=%s ego_s=%.2f reference_stop_s=%.2f front_stop_s=%.2f object_s_min=%.2f v=%.2f available=%.2f required=%.2f safety_margin=%.2f reachability_margin=%.2f\n",
       stop_s <= ego_s + std::max( 0.0, params.min_valid_stop_margin )
         ? "stop_s_behind_ego"
         : "stop_s_unreachable",
       ego_s,
       stop_s,
+      front_stop_s,
+      conflict.object_s_min,
       ego.vx,
       available_stop_distance,
-      required_stop_distance );
+      required_stop_distance,
+      stop_safety_margin,
+      stop_reachability_margin );
     std::fflush( stderr );
   }
 
@@ -5966,7 +6205,9 @@ plan_stop_on_route_before_corridor_conflict(
       pseudo_obstacle,
       ego,
       vehicle_params,
-      normalized_stop_before_obstacle( params ) );
+      normalized_stop_before_obstacle( params ),
+      std::max( 0.0, params.modified_route_braking_safety_margin ) +
+      std::max( 0.0, params.min_valid_stop_margin ) );
 
   const bool previous_fallback_allowed =
     planner.get_allow_previous_trajectory_fallback();
@@ -5987,7 +6228,7 @@ plan_stop_on_route_before_corridor_conflict(
   {
     std::fprintf(
       stderr,
-      "[OA][STOP_ROUTE] planner exception; keeping stop route without free-space fallback: %s\n",
+      "[OA][STOP_ROUTE] planner exception on stop route: %s\n",
       e.what() );
     std::fflush( stderr );
   }
@@ -6003,9 +6244,70 @@ plan_stop_on_route_before_corridor_conflict(
   {
     std::fprintf(
       stderr,
-      "[OA][stop] planner trajectory rejected: does not stop before conflict id=%d; keeping stop route without free-space fallback\n",
+      "[OA][STOP_ROUTE] invalid stop trajectory; retrying with maximum route-based braking id=%d\n",
       conflict.participant_id );
     std::fflush( stderr );
+
+    if( requested_stop_reachable )
+    {
+      result.success = false;
+      result.reason =
+        "OA reachable active-route stop profile invalid";
+      std::fprintf(
+        stderr,
+        "[OA][STOP_ROUTE] reachable stop profile invalid; refusing to move stop point to ego id=%d\n",
+        conflict.participant_id );
+      std::fflush( stderr );
+      return result;
+    }
+
+    result.modified_route = active_route;
+    set_route_points_from_s_to_zero( result.modified_route, ego_s );
+
+    planner.set_allow_previous_trajectory_fallback( false );
+    try
+    {
+      result.trajectory =
+        planner.plan_route_trajectory(
+          result.modified_route,
+          ego,
+          traffic_participants );
+    }
+    catch( const std::exception& e )
+    {
+      std::fprintf(
+        stderr,
+        "[OA][STOP_ROUTE] planner exception on maximum route-based braking: %s\n",
+        e.what() );
+      std::fflush( stderr );
+    }
+    planner.set_allow_previous_trajectory_fallback( previous_fallback_allowed );
+
+    if( result.trajectory.states.empty() ||
+        !trajectory_stops_before_conflict(
+          result.trajectory,
+          result.modified_route,
+          conflict,
+          vehicle_params,
+          params ) )
+    {
+      result.success = false;
+      result.reason =
+        "OA active-route maximum route-based braking failed";
+      std::fprintf(
+        stderr,
+        "[OA][STOP_ROUTE] maximum route-based braking failed or did not stop before conflict id=%d\n",
+        conflict.participant_id );
+      std::fflush( stderr );
+    }
+    else
+    {
+      std::fprintf(
+        stderr,
+        "[OA][STOP_ROUTE] maximum route-based braking trajectory accepted id=%d\n",
+        conflict.participant_id );
+      std::fflush( stderr );
+    }
   }
   else
   {

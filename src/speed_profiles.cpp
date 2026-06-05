@@ -76,7 +76,7 @@ SpeedProfile::generate_from_route_and_participants( const map::Route& route, con
     return;
 
   double s_curr      = it->first;
-  s_to_speed[s_curr] = initial_speed;
+  s_to_speed[s_curr] = std::max( 0.0, initial_speed );
 
   auto end_it = std::prev( route.reference_line.lower_bound( initial_s + length ) );
 
@@ -165,6 +165,13 @@ SpeedProfile::forward_pass( MapPointIter& it, MapPointIter& end_it, MapPointIter
     max_legal_speed *= comfort_settings.speed_fraction_of_limit;
 
     double desired_speed = std::min( { max_curvature_speed, max_legal_speed } );
+    if( desired_speed <= 0.0 )
+    {
+      s_to_speed[s_curr] = 0.0;
+      s_to_acc[s_curr] = -max_decel;
+      stop = true;
+      continue;
+    }
 
     double idm_acc = idm::calculate_idm_acc( route.get_length() - s_curr, object_distance, desired_speed, comfort_settings.time_headway,
                                              safety_distance, s_to_speed[s_prev], max_acc, object_speed );

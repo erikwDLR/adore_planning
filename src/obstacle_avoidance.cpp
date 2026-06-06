@@ -50,8 +50,8 @@ project_s_on_reference_line(
 
   const double first_s = route.reference_line.begin()->first;
   const double last_s = route.reference_line.rbegin()->first;
-  // NOTE: Min route window size (20.0) should be configurable via ObstacleAvoidanceParams::route_window_min
-  const double route_window = std::max( 20.0, last_s - first_s );
+  const double route_window =
+    std::max( ObstacleAvoidanceParams{}.route_window_min, last_s - first_s );
   const double coarse_s =
     std::isfinite( hint_s )
       ? hint_s
@@ -121,6 +121,12 @@ enum class AvoidanceCandidateType
   InLane,
   AdjacentSameDirection,
   OppositeDirection
+};
+
+enum class ShiftDirection
+{
+  Left,
+  Right
 };
 
 const char*
@@ -541,13 +547,13 @@ make_stop_trajectory( const dynamics::VehicleStateDynamic& ego, double dt )
 dynamics::Trajectory
 make_hard_stop_trajectory( const dynamics::VehicleStateDynamic& ego,
                            const dynamics::PhysicalVehicleParameters& vehicle_params,
-                           double dt )
+                           double dt,
+                           const ObstacleAvoidanceParams& params )
 {
   dynamics::Trajectory trajectory;
   trajectory.label = "obstacle avoidance: immediate hold";
 
-  const double step = std::max( 0.05, dt );
-  // NOTE: Trajectory step size (0.05) should be configurable via ObstacleAvoidanceParams::trajectory_step_size
+  const double step = std::max( params.trajectory_step_size, dt );
   const double start_speed = std::max( 0.0, ego.vx );
   const int samples = 6;
 
@@ -571,16 +577,16 @@ make_hard_stop_trajectory( const dynamics::VehicleStateDynamic& ego,
 
 void
 fill_world_footprint_from_participant( RouteCorridorConflict& conflict,
-                                       const dynamics::TrafficParticipant& participant )
+                                       const dynamics::TrafficParticipant& participant,
+                                       const ObstacleAvoidanceParams& params )
 {
   conflict.object_center_x = participant.state.x;
   conflict.object_center_y = participant.state.y;
   conflict.object_yaw = participant.state.yaw_angle;
-  // NOTE: Min vehicle dimension (0.1) should be configurable via ObstacleAvoidanceParams::min_vehicle_dimension
   conflict.object_length =
-    std::max( 0.1, participant.physical_parameters.body_length );
+    std::max( params.min_vehicle_dimension, participant.physical_parameters.body_length );
   conflict.object_width =
-    std::max( 0.1, participant.physical_parameters.body_width );
+    std::max( params.min_vehicle_dimension, participant.physical_parameters.body_width );
 
   const double half_length = 0.5 * conflict.object_length;
   const double half_width = 0.5 * conflict.object_width;
@@ -657,73 +663,14 @@ apply_avoidance_speed_profile( map::Route& route,
                                const dynamics::PhysicalVehicleParameters& vehicle_params,
                                const ObstacleAvoidanceParams& params )
 {
-  if( params.max_speed_during_avoidance <= 0.0 ||
-      !std::isfinite( ego_s ) ||
-      !std::isfinite( shift_start_s ) )
-  {
-    return;
-  }
-
-  if( !std::isfinite( maneuver_end_s ) )
-  {
-    maneuver_end_s = shift_start_s;
-  }
-  maneuver_end_s = std::max( maneuver_end_s, shift_start_s );
-
-  const double target_v = std::max( 0.0, params.max_speed_during_avoidance );
-  const double a_abs =
-    std::max( 0.1, std::fabs( vehicle_params.acceleration_min ) );
-  std::size_t approach_points = 0;
-  std::size_t capped_points = 0;
-
-  for( auto& [s, point] : route.reference_line )
-  {
-    if( s < ego_s )
-    {
-      continue;
-    }
-
-    if( s < shift_start_s )
-    {
-      const double distance_to_target = shift_start_s - s;
-      const double allowed_speed =
-        std::sqrt(
-          target_v * target_v +
-          2.0 * a_abs * std::max( 0.0, distance_to_target ) );
-      point.max_speed =
-        std::min(
-          point.max_speed.value_or( std::numeric_limits<double>::infinity() ),
-          allowed_speed );
-      ++approach_points;
-      continue;
-    }
-
-    if( s <= maneuver_end_s )
-    {
-      point.max_speed =
-        std::min(
-          point.max_speed.value_or( std::numeric_limits<double>::infinity() ),
-          target_v );
-      ++capped_points;
-    }
-  }
-
-  std::fprintf(
-    stderr,
-    "[OA][SPEED_PROFILE] avoidance speed approach profile to shift_start_s ego_s=%.2f shift_start_s=%.2f target_v=%.2f a_abs=%.2f points=%zu\n",
-    ego_s,
-    shift_start_s,
-    target_v,
-    a_abs,
-    approach_points );
-  std::fprintf(
-    stderr,
-    "[OA][SPEED_PROFILE] avoidance speed cap inside maneuver shift_start_s=%.2f maneuver_end_s=%.2f max_speed=%.2f points=%zu\n",
-    shift_start_s,
-    maneuver_end_s,
-    target_v,
-    capped_points );
-  std::fflush( stderr );
+  route =
+    RouteSpeedPolicy::apply_avoidance_speed_profile(
+      route,
+      ego_s,
+      shift_start_s,
+      maneuver_end_s,
+      vehicle_params,
+      params );
 }
 
 map::Route
@@ -733,7 +680,8 @@ build_stop_route_before_obstacle(
   const dynamics::VehicleStateDynamic& ego,
   const dynamics::PhysicalVehicleParameters& vehicle_params,
   double stop_before_obstacle,
-  double safety_margin = 0.0 )
+  double safety_margin,
+  const ObstacleAvoidanceParams& params )
 {
   map::Route stop_route = route;
 
@@ -774,10 +722,9 @@ build_stop_route_before_obstacle(
   /*
    * acceleration_min is defined in the vehicle parameter file, e.g. NGC.json.
    * It is expected to be negative, for example -1.5 m/s².
-   * NOTE: Fallback value (0.1) should be configurable via ObstacleAvoidanceParams::min_motion_speed
    */
   const double braking_deceleration =
-    std::max( 0.1, std::fabs( vehicle_params.acceleration_min ) );
+    std::max( params.min_motion_speed, std::fabs( vehicle_params.acceleration_min ) );
 
   const double current_speed =
     std::max( 0.0, ego.vx );
@@ -834,34 +781,13 @@ build_stop_route_before_obstacle(
     hard_reachability_margin );
   std::fflush( stderr );
 
-  insert_zero_speed_stop_point( stop_route, stop_s );
-  
-  /*
-   * Start braking as late as physically possible under the selected deceleration.
-   * The speed limit along the route is then:
-   *   v_allowed(s) = sqrt( 2 * a_brake * (stop_s - s) )
-   * This makes v_allowed become zero exactly at stop_s.
-   * If the required braking distance is greater than or equal to the available
-   * distance, braking has to start immediately.
-   * Otherwise, braking starts at the latest possible point that still allows the
-   * vehicle to stop at stop_s under the selected deceleration.
-  */
-  const double brake_start_s =
-    ( required_braking_distance >= available_distance )
-      ? ego_s
-      : stop_s - required_braking_distance;
-
-  for( auto& [s, point] : stop_route.reference_line )
-  {
-    if( s >= brake_start_s )
-    {
-      const double dist_to_stop = stop_s - s;
-      const double allowed_speed = std::sqrt( 2.0 * braking_deceleration * std::max( 0.0, dist_to_stop ) );
-      point.max_speed = std::min( point.max_speed.value_or( std::numeric_limits<double>::infinity() ), allowed_speed );
-    }
-  }
-
-  return stop_route;
+  return RouteSpeedPolicy::apply_stop_profile(
+    stop_route,
+    ego_s,
+    ego.vx,
+    stop_s,
+    vehicle_params,
+    params );
 }
 
 bool
@@ -1276,7 +1202,7 @@ participant_has_future_motion_prediction(
 
   const double now_time = participant.state.time;
   const double motion_speed_threshold =
-    std::max( 0.1, min_motion_speed );
+    std::max( 0.0, min_motion_speed );
   const double motion_distance_threshold =
     std::max( 0.5, min_motion_distance );
 
@@ -1400,8 +1326,7 @@ find_static_obstacle_group_on_route(
           participant,
           params.max_static_object_speed,
           1.0 ) ||
-        // NOTE: Min motion speed threshold (0.05) should be configurable via ObstacleAvoidanceParams::min_motion_speed
-        ( std::fabs( participant.state.vx ) > 0.05 &&
+        ( std::fabs( participant.state.vx ) > params.min_motion_speed &&
           participant_is_slow_opposite_direction_traffic(
             route,
             participant,
@@ -1692,12 +1617,14 @@ project_participant_footprint_to_route(
 
   const double cos_yaw = std::cos( yaw );
   const double sin_yaw = std::sin( yaw );
+  const double min_vehicle_dimension =
+    ObstacleAvoidanceParams{}.min_vehicle_dimension;
 
   const double half_length =
-    0.5 * std::max( 0.1, participant.physical_parameters.body_length );
+    0.5 * std::max( min_vehicle_dimension, participant.physical_parameters.body_length );
 
   const double half_width =
-    0.5 * std::max( 0.1, participant.physical_parameters.body_width );
+    0.5 * std::max( min_vehicle_dimension, participant.physical_parameters.body_width );
 
   const std::array<std::pair<double, double>, 4> local_corners = {{
     { -half_length, -half_width },
@@ -1789,7 +1716,7 @@ participant_footprint_overlaps_ego_lane(
   // clearly separated opposite lane from triggering unless it overlaps the ego
   // corridor.
   const double corridor_half_width =
-    0.5 * std::max( 0.1, ego_params.body_width ) +
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width ) +
     params.ego_corridor_safety_margin +
     params.ego_lane_oncoming_lateral_margin;
 
@@ -1878,7 +1805,7 @@ find_ego_lane_oncoming_threat(
 
     const double time_to_conflict =
       std::max( 0.0, distance_s ) /
-      std::max( 0.1, closing_speed );
+      std::max( params.min_motion_speed, closing_speed );
 
     if( params.ego_lane_oncoming_time_horizon > 0.0 &&
         time_to_conflict > params.ego_lane_oncoming_time_horizon )
@@ -1947,7 +1874,7 @@ compute_opposite_lane_conflict_interval(
   }
 
   const double ego_half_width =
-    0.5 * std::max( 0.1, ego_params.body_width );
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
 
   const bool shift_left = lateral_shift > 0.0;
 
@@ -2852,7 +2779,7 @@ required_signed_shift_for_obstacle(
   }
 
   const double ego_half_width =
-    0.5 * std::max( 0.1, ego_params.body_width );
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const double side_clearance =
     std::max( 0.0, params.side_clearance );
 
@@ -3442,7 +3369,8 @@ candidate_respects_drivable_area( const map::Route& route,
     return false;
   }
 
-  const double ego_half_width = 0.5 * std::max( 0.1, ego_params.body_width );
+  const double ego_half_width =
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
 
   for( const auto& [route_s, route_point] : route.reference_line )
   {
@@ -3546,76 +3474,17 @@ candidate_respects_drivable_area( const map::Route& route,
   return true;
 }
 
-[[maybe_unused]] double
-required_left_shift_at_s( double s,
-                          const AvoidanceGroup& group,
-                          const dynamics::PhysicalVehicleParameters& ego_params,
-                          const ObstacleAvoidanceParams& params )
-{
-  const double ego_half_width = 0.5 * std::max( 0.1, ego_params.body_width );
-  double required_left_shift = 0.0;
-
-  for( const auto& obs : group.obstacles )
-  {
-    if( !obs.overlaps_ego_corridor )
-    {
-      continue;
-    }
-
-    if( s < obs.object_s_min - params.front_clearance ||
-        s > obs.object_s_max + params.rear_clearance )
-    {
-      continue;
-    }
-
-    required_left_shift =
-      std::max(
-        required_left_shift,
-        obs.object_l_max + params.side_clearance + ego_half_width );
-  }
-
-  return required_left_shift;
-}
-
-[[maybe_unused]] double
-required_right_shift_at_s( double s,
-                           const AvoidanceGroup& group,
-                           const dynamics::PhysicalVehicleParameters& ego_params,
-                           const ObstacleAvoidanceParams& params )
-{
-  const double ego_half_width = 0.5 * std::max( 0.1, ego_params.body_width );
-  double required_right_shift = 0.0;
-
-  for( const auto& obs : group.obstacles )
-  {
-    if( !obs.overlaps_ego_corridor )
-    {
-      continue;
-    }
-
-    if( s < obs.object_s_min - params.front_clearance ||
-        s > obs.object_s_max + params.rear_clearance )
-    {
-      continue;
-    }
-
-    required_right_shift =
-      std::min(
-        required_right_shift,
-        obs.object_l_min - params.side_clearance - ego_half_width );
-  }
-
-  return required_right_shift;
-}
-
 ShiftCandidate
-make_left_candidate_from_obstacle_hulls(
+make_candidate_from_obstacle_hulls(
+  ShiftDirection direction,
   const AvoidanceGroup& group,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params )
 {
-  const double ego_half_width = 0.5 * std::max( 0.1, ego_params.body_width );
-  double required_left_shift = 0.0;
+  const double ego_half_width =
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
+  const bool shift_left = direction == ShiftDirection::Left;
+  double required_shift = 0.0;
   std::size_t hull_count = 0;
 
   for( const auto& obs : group.obstacles )
@@ -3626,74 +3495,38 @@ make_left_candidate_from_obstacle_hulls(
     }
 
     const double required_for_obs =
-      obs.object_l_max + params.side_clearance + ego_half_width;
+      shift_left
+        ? obs.object_l_max + params.side_clearance + ego_half_width
+        : obs.object_l_min - params.side_clearance - ego_half_width;
 
     std::fprintf(
       stderr,
-      "[OA][hull] left required shift from obstacle id=%d l_max=%.2f required=%.2f\n",
+      "[OA][hull] %s required shift from obstacle id=%d l_%s=%.2f required=%.2f\n",
+      shift_left ? "left" : "right",
       obs.id,
-      obs.object_l_max,
+      shift_left ? "max" : "min",
+      shift_left ? obs.object_l_max : obs.object_l_min,
       required_for_obs );
     std::fflush( stderr );
 
-    required_left_shift = std::max( required_left_shift, required_for_obs );
+    required_shift =
+      shift_left
+        ? std::max( required_shift, required_for_obs )
+        : std::min( required_shift, required_for_obs );
     ++hull_count;
   }
 
   std::fprintf(
     stderr,
     "[OA][hull] selected constant shift=%.2f from individual obstacle hulls count=%zu\n",
-    required_left_shift,
+    required_shift,
     hull_count );
   std::fflush( stderr );
 
   return ShiftCandidate{
-    required_left_shift,
-    std::isfinite( required_left_shift ) && required_left_shift > 0.0 };
-}
-
-ShiftCandidate
-make_right_candidate_from_obstacle_hulls(
-  const AvoidanceGroup& group,
-  const dynamics::PhysicalVehicleParameters& ego_params,
-  const ObstacleAvoidanceParams& params )
-{
-  const double ego_half_width = 0.5 * std::max( 0.1, ego_params.body_width );
-  double required_right_shift = 0.0;
-  std::size_t hull_count = 0;
-
-  for( const auto& obs : group.obstacles )
-  {
-    if( !obs.overlaps_ego_corridor )
-    {
-      continue;
-    }
-
-    const double required_for_obs =
-      obs.object_l_min - params.side_clearance - ego_half_width;
-
-    std::fprintf(
-      stderr,
-      "[OA][hull] right required shift from obstacle id=%d l_min=%.2f required=%.2f\n",
-      obs.id,
-      obs.object_l_min,
-      required_for_obs );
-    std::fflush( stderr );
-
-    required_right_shift = std::min( required_right_shift, required_for_obs );
-    ++hull_count;
-  }
-
-  std::fprintf(
-    stderr,
-    "[OA][hull] selected constant shift=%.2f from individual obstacle hulls count=%zu\n",
-    required_right_shift,
-    hull_count );
-  std::fflush( stderr );
-
-  return ShiftCandidate{
-    required_right_shift,
-    std::isfinite( required_right_shift ) && required_right_shift < 0.0 };
+    required_shift,
+    std::isfinite( required_shift ) &&
+      ( shift_left ? required_shift > 0.0 : required_shift < 0.0 ) };
 }
 
 bool
@@ -3719,7 +3552,8 @@ candidate_respects_opposite_direction_area(
     return false;
   }
 
-  const double ego_half_width = 0.5 * std::max( 0.1, ego_params.body_width );
+  const double ego_half_width =
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const bool shift_left = lateral_shift > 0.0;
 
   for( const auto& [route_s, route_point] : route.reference_line )
@@ -3921,15 +3755,6 @@ evaluate_shift_candidate( ShiftCandidate& candidate,
   }
 }
 
-std::vector<ObstacleAvoidanceParams>
-make_candidate_parameter_variants( const ObstacleAvoidanceParams& params )
-{
-  std::vector<ObstacleAvoidanceParams> variants;
-  variants.push_back( params );
-
-  return variants;
-}
-
 std::vector<ShiftCandidate>
 generate_shift_candidate_variants(
   const AvoidanceGroup& group,
@@ -3939,9 +3764,17 @@ generate_shift_candidate_variants(
   std::vector<ShiftCandidate> candidates;
 
   const auto left_base =
-    make_left_candidate_from_obstacle_hulls( group, ego_params, params );
+    make_candidate_from_obstacle_hulls(
+      ShiftDirection::Left,
+      group,
+      ego_params,
+      params );
   const auto right_base =
-    make_right_candidate_from_obstacle_hulls( group, ego_params, params );
+    make_candidate_from_obstacle_hulls(
+      ShiftDirection::Right,
+      group,
+      ego_params,
+      params );
 
   const int extra_steps =
     params.enable_multi_candidate_route_shift
@@ -4009,7 +3842,8 @@ generate_opposite_lane_candidate_variants(
     return candidates;
   }
 
-  const double ego_half_width = 0.5 * std::max( 0.1, ego_params.body_width );
+  const double ego_half_width =
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const double required_lane_margin = 0.0;
 
   const std::array<double, 3> sample_s_values = {{
@@ -4141,13 +3975,21 @@ generate_opposite_lane_candidate_variants(
     if( shift_left )
     {
       const auto hull_shift =
-        make_left_candidate_from_obstacle_hulls( group, ego_params, params );
+        make_candidate_from_obstacle_hulls(
+          ShiftDirection::Left,
+          group,
+          ego_params,
+          params );
       obstacle_clear_center_l = hull_shift.shift;
     }
     else
     {
       const auto hull_shift =
-        make_right_candidate_from_obstacle_hulls( group, ego_params, params );
+        make_candidate_from_obstacle_hulls(
+          ShiftDirection::Right,
+          group,
+          ego_params,
+          params );
       obstacle_clear_center_l = hull_shift.shift;
     }
 
@@ -4155,17 +3997,9 @@ generate_opposite_lane_candidate_variants(
       0.5 * ( opposite_intersection.min_l + opposite_intersection.max_l );
 
     std::vector<double> requested_centers;
-    requested_centers.push_back( opposite_center_l );
     requested_centers.push_back( obstacle_clear_center_l );
     requested_centers.push_back(
       std::clamp( opposite_center_l, center_l_min, center_l_max ) );
-
-    const double extra_step = std::max( 0.0, params.lateral_candidate_extra_step );
-    if( extra_step > 0.0 )
-    {
-      requested_centers.push_back( opposite_center_l - extra_step );
-      requested_centers.push_back( opposite_center_l + extra_step );
-    }
 
     std::size_t generated_for_side = 0;
     for( double requested_center_l : requested_centers )
@@ -4239,7 +4073,7 @@ validate_planned_shift_trajectory(
   }
 
   const double ego_half_width =
-    0.5 * std::max( 0.1, ego_params.body_width );
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const double ego_front_offset =
     ego_params.wheelbase + ego_params.front_axle_to_front_border;
   const double ego_rear_offset =
@@ -4466,16 +4300,19 @@ validate_planned_shift_trajectory(
 }
 
 double
-score_route_shift_candidate( const RouteShiftPlanCandidate& candidate )
+score_route_shift_candidate( const RouteShiftPlanCandidate& candidate,
+                             const ObstacleAvoidanceParams& params )
 {
   double score = 0.0;
 
   // Hard safety checks have already accepted the candidate; scoring is for
   // choosing the least intrusive accepted maneuver.
   score += std::fabs( candidate.shift_candidate.shift );
-  // NOTE: Lateral shift penalty (20.0) should be configurable via ObstacleAvoidanceParams::lateral_shift_penalty_score
-  score += candidate.shift_candidate.in_lane ? 0.0 : 20.0;
-  score += candidate.uses_opposite_lane ? 40.0 : 0.0;
+  score +=
+    candidate.shift_candidate.in_lane
+      ? 0.0
+      : params.lateral_shift_penalty_score;
+  score += candidate.uses_opposite_lane ? params.opposite_lane_penalty_score : 0.0;
   score -= 0.5 * std::max( 0.0, candidate.validation.min_lane_margin );
   score -= 0.5 * std::max( 0.0, candidate.validation.min_obstacle_lateral_margin );
 
@@ -4559,12 +4396,192 @@ build_modified_avoidance_route( const map::Route& route,
 
 } // namespace
 
+map::Route
+RouteSpeedPolicy::apply_avoidance_speed_profile(
+  const map::Route& route,
+  double ego_s,
+  double shift_start_s,
+  double maneuver_end_s,
+  const dynamics::PhysicalVehicleParameters& vehicle_params,
+  const ObstacleAvoidanceParams& params )
+{
+  map::Route profiled_route = route;
+
+  if( params.max_speed_during_avoidance <= 0.0 ||
+      !std::isfinite( ego_s ) ||
+      !std::isfinite( shift_start_s ) )
+  {
+    return profiled_route;
+  }
+
+  if( !std::isfinite( maneuver_end_s ) )
+  {
+    maneuver_end_s = shift_start_s;
+  }
+  maneuver_end_s = std::max( maneuver_end_s, shift_start_s );
+
+  const double target_v = std::max( 0.0, params.max_speed_during_avoidance );
+  const double a_abs =
+    std::max( params.min_motion_speed, std::fabs( vehicle_params.acceleration_min ) );
+  std::size_t approach_points = 0;
+  std::size_t capped_points = 0;
+
+  for( auto& [s, point] : profiled_route.reference_line )
+  {
+    if( s < ego_s )
+    {
+      continue;
+    }
+
+    if( s < shift_start_s )
+    {
+      const double distance_to_shift_start = shift_start_s - s;
+      const double allowed_speed =
+        std::sqrt(
+          target_v * target_v +
+          2.0 * a_abs * std::max( 0.0, distance_to_shift_start ) );
+      point.max_speed =
+        std::min(
+          point.max_speed.value_or( std::numeric_limits<double>::infinity() ),
+          allowed_speed );
+      ++approach_points;
+      continue;
+    }
+
+    if( s <= maneuver_end_s )
+    {
+      point.max_speed =
+        std::min(
+          point.max_speed.value_or( std::numeric_limits<double>::infinity() ),
+          target_v );
+      ++capped_points;
+    }
+  }
+
+  std::fprintf(
+    stderr,
+    "[OA][SPEED_PROFILE] avoidance speed approach profile to shift_start_s ego_s=%.2f shift_start_s=%.2f target_v=%.2f a_abs=%.2f points=%zu\n",
+    ego_s,
+    shift_start_s,
+    target_v,
+    a_abs,
+    approach_points );
+  std::fprintf(
+    stderr,
+    "[OA][SPEED_PROFILE] avoidance speed cap inside maneuver shift_start_s=%.2f maneuver_end_s=%.2f max_speed=%.2f points=%zu\n",
+    shift_start_s,
+    maneuver_end_s,
+    target_v,
+    capped_points );
+  std::fflush( stderr );
+
+  return profiled_route;
+}
+
+map::Route
+RouteSpeedPolicy::apply_stop_profile(
+  const map::Route& route,
+  double ego_s,
+  double ego_v,
+  double desired_stop_s,
+  const dynamics::PhysicalVehicleParameters& vehicle_params,
+  const ObstacleAvoidanceParams& params )
+{
+  map::Route stop_route = route;
+
+  if( stop_route.reference_line.empty() ||
+      !std::isfinite( ego_s ) ||
+      !std::isfinite( desired_stop_s ) )
+  {
+    return stop_route;
+  }
+
+  const double braking_deceleration =
+    std::max( params.min_motion_speed, std::fabs( vehicle_params.acceleration_min ) );
+  const double current_speed = std::max( 0.0, ego_v );
+  const double available_distance = desired_stop_s - ego_s;
+  const double required_braking_distance =
+    current_speed * current_speed / ( 2.0 * braking_deceleration );
+
+  if( available_distance <= 0.0 ||
+      available_distance < required_braking_distance )
+  {
+    set_route_points_from_s_to_zero( stop_route, ego_s );
+    return stop_route;
+  }
+
+  insert_zero_speed_stop_point( stop_route, desired_stop_s );
+
+  const double brake_start_s =
+    ( required_braking_distance >= available_distance )
+      ? ego_s
+      : desired_stop_s - required_braking_distance;
+
+  for( auto& [s, point] : stop_route.reference_line )
+  {
+    if( s >= brake_start_s )
+    {
+      const double dist_to_stop = desired_stop_s - s;
+      const double allowed_speed =
+        std::sqrt(
+          2.0 * braking_deceleration * std::max( 0.0, dist_to_stop ) );
+      point.max_speed =
+        std::min(
+          point.max_speed.value_or( std::numeric_limits<double>::infinity() ),
+          allowed_speed );
+    }
+  }
+
+  return stop_route;
+}
+
+StopPlan
+RouteStopPolicy::plan_stop_on_route(
+  const map::Route& route,
+  double ego_s,
+  double ego_v,
+  double desired_stop_s,
+  StopReason reason,
+  const dynamics::PhysicalVehicleParameters& vehicle_params,
+  const ObstacleAvoidanceParams& params )
+{
+  StopPlan plan;
+  plan.route = route;
+  plan.stop_s = desired_stop_s;
+  plan.reason = reason;
+
+  if( route.reference_line.empty() ||
+      !std::isfinite( ego_s ) ||
+      !std::isfinite( desired_stop_s ) )
+  {
+    plan.valid = false;
+    plan.reason =
+      !std::isfinite( ego_s ) || !std::isfinite( desired_stop_s )
+        ? StopReason::InvalidProjection
+        : reason;
+    return plan;
+  }
+
+  plan.route =
+    RouteSpeedPolicy::apply_stop_profile(
+      route,
+      ego_s,
+      ego_v,
+      desired_stop_s,
+      vehicle_params,
+      params );
+  plan.valid = true;
+
+  return plan;
+}
+
 ObstacleAvoidanceResult
 try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                              const map::Route& route,
                              const dynamics::VehicleStateDynamic& ego,
                              const dynamics::TrafficParticipantSet& traffic_participants,
-                             const ObstacleAvoidanceParams& params )
+                             const ObstacleAvoidanceParams& params,
+                             const std::vector<int>* additional_ignored_participant_ids )
 {
   ObstacleAvoidanceResult result;
   result.modified_route = route;
@@ -4633,7 +4650,8 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
         vehicle_params,
         stop_before_obstacle,
         std::max( 0.0, params.modified_route_braking_safety_margin ) +
-        std::max( 0.0, params.min_valid_stop_margin ) );
+        std::max( 0.0, params.min_valid_stop_margin ),
+        params );
 
     const bool previous_fallback_allowed =
       planner.get_allow_previous_trajectory_fallback();
@@ -4718,6 +4736,19 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     return plan_stop_before_obstacle(
       ObstacleAvoidanceMode::StopBeforeObstacle,
       "driving mission (stop before obstacle: invalid ego route projection)" );
+  }
+
+  std::vector<int> ignored_participant_ids =
+    obstacle_group->envelope.participant_ids;
+  if( additional_ignored_participant_ids != nullptr )
+  {
+    for( const int participant_id : *additional_ignored_participant_ids )
+    {
+      if( !contains_participant_id( ignored_participant_ids, participant_id ) )
+      {
+        ignored_participant_ids.push_back( participant_id );
+      }
+    }
   }
 
   std::vector<RouteShiftPlanCandidate> accepted_candidates;
@@ -4846,15 +4877,11 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     shift_variants.size() );
   std::fflush( stderr );
 
-  const auto params_variants = make_candidate_parameter_variants( params );
-
   for( const auto& raw_shift : shift_variants )
   {
-    for( const auto& candidate_params : params_variants )
-    {
       RouteShiftPlanCandidate candidate;
       candidate.shift_candidate = raw_shift;
-      candidate.params = candidate_params;
+      candidate.params = params;
       ++evaluated_candidate_count;
 
       evaluate_shift_candidate(
@@ -4926,8 +4953,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           candidate.modified_route,
           ego,
           ego_s_original,
-          // NOTE: Route search window (20.0) should be configurable via ObstacleAvoidanceParams::route_window_min
-          20.0 );
+          candidate.params.route_window_min );
 
       if( !std::isfinite( candidate.ego_s_modified ) )
       {
@@ -4945,6 +4971,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       }
 
       auto candidate_planner = planner;
+      candidate_planner.set_allow_previous_trajectory_fallback( false );
       try
       {
         candidate.trajectory =
@@ -5014,7 +5041,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           vehicle_params,
           candidate.params,
           &candidate.trajectory,
-          &obstacle_group->envelope.participant_ids );
+          &ignored_participant_ids );
 
       const bool ignore_other_lane_oncoming =
         candidate.shift_candidate.type == AvoidanceCandidateType::InLane &&
@@ -5105,9 +5132,8 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
         }
       }
 
-      candidate.score = score_route_shift_candidate( candidate );
+      candidate.score = score_route_shift_candidate( candidate, candidate.params );
       accepted_candidates.push_back( candidate );
-    }
   }
 
   if( accepted_candidates.empty() )
@@ -5269,7 +5295,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       vehicle_params,
       selected.params,
       &result.trajectory,
-      &obstacle_group->envelope.participant_ids );
+      &ignored_participant_ids );
 
   std::fprintf(
     stderr,
@@ -5345,7 +5371,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
   std::fflush( stderr );
 
   const double modified_route_ego_half_width =
-    0.5 * std::max( 0.1, vehicle_params.body_width );
+    0.5 * std::max( params.min_vehicle_dimension, vehicle_params.body_width );
   for( const int id : obstacle_group->envelope.participant_ids )
   {
     const auto participant_it = traffic_participants.participants.find( id );
@@ -5526,7 +5552,8 @@ try_plan_ego_lane_oncoming_stop( TrajectoryPlanner& planner,
     vehicle_params,
     params.ego_lane_oncoming_stop_distance,
     std::max( 0.0, params.modified_route_braking_safety_margin ) +
-    std::max( 0.0, params.min_valid_stop_margin ) );
+    std::max( 0.0, params.min_valid_stop_margin ),
+    params );
 
   const bool previous_fallback_allowed =
     planner.get_allow_previous_trajectory_fallback();
@@ -5616,7 +5643,7 @@ check_route_corridor_safety(
   }
 
   const double ego_half_width =
-    0.5 * std::max( 0.1, ego_params.body_width );
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const double corridor_half_width =
     ego_half_width + std::max( 0.0, params.side_clearance );
   const double check_start_s =
@@ -5962,7 +5989,7 @@ check_route_corridor_safety(
     conflict.ttc_source = ttc_source;
     conflict.currently_inside_corridor = currently_overlaps_route_corridor;
 
-    fill_world_footprint_from_participant( conflict, conflict_world_participant );
+    fill_world_footprint_from_participant( conflict, conflict_world_participant, params );
 
     char buf[384];
     std::snprintf(
@@ -6155,7 +6182,7 @@ plan_stop_on_route_before_corridor_conflict(
   const double stop_s =
     front_stop_s - ego_front_offset;
   const double deceleration =
-    std::max( 0.1, std::fabs( vehicle_params.acceleration_min ) );
+    std::max( params.min_motion_speed, std::fabs( vehicle_params.acceleration_min ) );
   const double required_braking_distance =
     std::max( 0.0, ego.vx ) * std::max( 0.0, ego.vx ) /
     ( 2.0 * deceleration );
@@ -6207,7 +6234,8 @@ plan_stop_on_route_before_corridor_conflict(
       vehicle_params,
       normalized_stop_before_obstacle( params ),
       std::max( 0.0, params.modified_route_braking_safety_margin ) +
-      std::max( 0.0, params.min_valid_stop_margin ) );
+      std::max( 0.0, params.min_valid_stop_margin ),
+      params );
 
   const bool previous_fallback_allowed =
     planner.get_allow_previous_trajectory_fallback();

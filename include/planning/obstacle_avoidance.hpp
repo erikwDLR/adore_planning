@@ -244,7 +244,59 @@ struct ObstacleAvoidanceParams
   // Lateral shift penalty score for non-in-lane candidates. Higher values penalize
   // lane-change maneuvers, encouraging in-lane solutions when available.
   double lateral_shift_penalty_score = 20.0;
+  double opposite_lane_penalty_score = 40.0;
 
+};
+
+class RouteSpeedPolicy
+{
+public:
+  static map::Route apply_avoidance_speed_profile(
+    const map::Route& route,
+    double ego_s,
+    double shift_start_s,
+    double maneuver_end_s,
+    const dynamics::PhysicalVehicleParameters& vehicle_params,
+    const ObstacleAvoidanceParams& params );
+
+  static map::Route apply_stop_profile(
+    const map::Route& route,
+    double ego_s,
+    double ego_v,
+    double desired_stop_s,
+    const dynamics::PhysicalVehicleParameters& vehicle_params,
+    const ObstacleAvoidanceParams& params );
+};
+
+enum class StopReason
+{
+  StaticObstacleAhead,
+  OncomingOnEgoLane,
+  ModifiedRouteConflict,
+  ReplanFailed,
+  InvalidProjection,
+  EmergencyFallback
+};
+
+struct StopPlan
+{
+  bool valid = false;
+  map::Route route;
+  double stop_s = 0.0;
+  StopReason reason = StopReason::EmergencyFallback;
+};
+
+class RouteStopPolicy
+{
+public:
+  static StopPlan plan_stop_on_route(
+    const map::Route& route,
+    double ego_s,
+    double ego_v,
+    double desired_stop_s,
+    StopReason reason,
+    const dynamics::PhysicalVehicleParameters& vehicle_params,
+    const ObstacleAvoidanceParams& params );
 };
 
 
@@ -551,7 +603,8 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                              const map::Route& route,
                              const dynamics::VehicleStateDynamic& ego,
                              const dynamics::TrafficParticipantSet& traffic_participants,
-                             const ObstacleAvoidanceParams& params = {} );
+                             const ObstacleAvoidanceParams& params = {},
+                             const std::vector<int>* additional_ignored_participant_ids = nullptr );
 
 } // namespace planner
 } // namespace adore

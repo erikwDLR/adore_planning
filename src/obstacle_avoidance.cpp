@@ -2720,10 +2720,9 @@ avoidance_shift_alpha_at_s( double s,
       const double bridge_floor =
         std::clamp( params.min_alpha_between_hull_obstacles, 0.0, 1.0 );
 
-      const double bridge_start_s =
-        previous.object_s_max + params.rear_clearance;
-      const double bridge_end_s =
-        std::max( bridge_start_s, next.object_s_min - params.front_clearance );
+      const double bridge_start_s = previous.object_s_max;
+
+      const double bridge_end_s = next.object_s_min;
 
       if( s < bridge_start_s || s > bridge_end_s )
       {
@@ -2912,10 +2911,8 @@ avoidance_shift_offset_at_s(
         continue;
       }
 
-      const double bridge_start_s =
-        previous.object_s_max + params.rear_clearance;
-      const double bridge_end_s =
-        std::max( bridge_start_s, next.object_s_min - params.front_clearance );
+      const double bridge_start_s = previous.object_s_max;
+      const double bridge_end_s = next.object_s_min;
 
       if( s < bridge_start_s || s > bridge_end_s ||
           bridge_end_s <= bridge_start_s + 0.1 )
@@ -2928,21 +2925,26 @@ avoidance_shift_offset_at_s(
           ( s - bridge_start_s ) / ( bridge_end_s - bridge_start_s ),
           0.0,
           1.0 );
-      double bridge_offset =
-        previous_shift +
-        ( next_shift - previous_shift ) * smoothstep01( t );
+      const double bridge_floor =
+        std::clamp( params.min_alpha_between_hull_obstacles, 0.0, 1.0 );
+      double bridge_alpha = 1.0;
 
+      if( t <= 0.5 )
       {
-        const double bridge_floor =
-          std::clamp( params.min_alpha_between_hull_obstacles, 0.0, 1.0 ) *
-          std::max( std::fabs( previous_shift ), std::fabs( next_shift ) );
-        if( std::fabs( bridge_offset ) < bridge_floor )
-        {
-          bridge_offset =
-            ( nominal_lateral_shift >= 0.0 ? 1.0 : -1.0 ) * bridge_floor;
-        }
+        bridge_alpha =
+          1.0 - ( 1.0 - bridge_floor ) * smoothstep01( 2.0 * t );
+      }
+      else
+      {
+        bridge_alpha =
+          bridge_floor +
+          ( 1.0 - bridge_floor ) * smoothstep01( 2.0 * t - 1.0 );
       }
 
+      const double bridge_shift =
+        previous_shift +
+        ( next_shift - previous_shift ) * smoothstep01( t );
+      const double bridge_offset = bridge_shift * bridge_alpha;
       offset = choose_larger_magnitude_shift( offset, bridge_offset );
     }
   }
@@ -4359,9 +4361,11 @@ build_modified_avoidance_route( const map::Route& route,
     {
       std::fprintf(
         stderr,
-        "[OA][hull] s=%.2f alpha=%.3f source=%s\n",
+        "[OA][hull] s=%.2f alpha=%.3f actual_offset=%.3f nominal_shift=%.3f source=%s\n",
         s,
         alpha,
+        offset,
+        lateral_shift,
         alpha_sample.source );
       std::fflush( stderr );
     }

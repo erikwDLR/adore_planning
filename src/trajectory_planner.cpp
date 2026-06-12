@@ -124,26 +124,31 @@ TrajectoryPlanner::make_trajectory_cost( const dynamics::Trajectory& ref_traj )
 
 dynamics::Trajectory
 TrajectoryPlanner::plan_route_trajectory( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
-                                          const dynamics::TrafficParticipantSet& traffic_participants )
+                                          const dynamics::TrafficParticipantSet& traffic_participants,
+                                          const dynamics::TrafficSignalSet&      traffic_signals )
 {
-  return plan_route_trajectory_with_custom_comfort_settings(latest_route, current_state, traffic_participants, comfort_settings );
+  return plan_route_trajectory_with_custom_comfort_settings( latest_route, current_state, traffic_participants, comfort_settings,
+                                                             traffic_signals );
 }
 
-
 dynamics::Trajectory
-TrajectoryPlanner::plan_route_trajectory_with_custom_comfort_settings( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
-                                          const dynamics::TrafficParticipantSet& traffic_participants, const dynamics::ComfortSettings custom_comfort_settings )
+TrajectoryPlanner::plan_route_trajectory_with_custom_comfort_settings( const map::Route&                      latest_route,
+                                                                       const dynamics::VehicleStateDynamic&   current_state,
+                                                                       const dynamics::TrafficParticipantSet& traffic_participants,
+                                                                       const dynamics::ComfortSettings        custom_comfort_settings,
+                                                                       const dynamics::TrafficSignalSet&      traffic_signals )
 {
-  double initial_s = latest_route.get_s( current_state );
+  double     initial_s          = latest_route.get_s( current_state );
+  map::Route route_with_signals = compute_traffic_light_behavior( current_state, latest_route, traffic_signals );
 
   SpeedProfile speed_profile;
   speed_profile.set_vehicle_parameters( vehicle_params );
   speed_profile.set_comfort_settings( custom_comfort_settings );
 
-  speed_profile.generate_from_route_and_participants( latest_route, traffic_participants, current_state.vx, initial_s, current_state.time,
-                                                      ref_traj_length );
+  speed_profile.generate_from_route_and_participants( route_with_signals, traffic_participants, current_state.vx, initial_s,
+                                                      current_state.time, ref_traj_length );
 
-  auto ref_traj = generate_trajectory_from_speed_profile( speed_profile, latest_route, current_state, dt );
+  auto ref_traj = generate_trajectory_from_speed_profile( speed_profile, route_with_signals, current_state, dt );
 
   if( ref_traj.states.size() < 1 )
   {
@@ -252,11 +257,6 @@ TrajectoryPlanner::setup_problem()
   upper_bounds << vehicle_params.steering_angle_max, vehicle_params.acceleration_max;
   problem->input_lower_bounds = lower_bounds;
   problem->input_upper_bounds = upper_bounds;
-  // Eigen::VectorXd state_lower_bounds( problem->state_dim ), state_upper_bounds( problem->state_dim );
-  // state_lower_bounds << -100000000000, -100000000000, -1000000000, 0.0, -vehicle_params.steering_angle_max;
-  // state_upper_bounds << 100000000000, 100000000000, 100000000000, 15.0, vehicle_params.steering_angle_max;
-  // problem->state_lower_bounds = state_lower_bounds;
-  // problem->state_upper_bounds = state_upper_bounds;
   problem->stage_cost         = make_trajectory_cost( reference_trajectory );
 
   problem->initial_state << start_state.x, start_state.y, start_state.yaw_angle, start_state.vx, start_state.steering_angle;
@@ -275,6 +275,117 @@ TrajectoryPlanner::setup_problem()
 
   problem->initialize_problem();
   problem->verify_problem();
+}
+
+map::Route
+TrajectoryPlanner::compute_traffic_light_behavior( const dynamics::VehicleStateDynamic& current_state, const map::Route& latest_route,
+                                                   const dynamics::TrafficSignalSet& traffic_signals )
+{
+  auto   route_with_signal = latest_route;
+  double current_s         = latest_route.get_s( current_state );
+  auto   closest_point     = latest_route.get_pose_at_s( current_s );
+
+  bool found_light                   = false;
+  bool did_not_stop_at_traffic_light = false;
+
+  adore::math::Point2d first_light_point;
+  int                  first_light_state = 2; // GREEN
+
+  // Find first traffic light
+  for( const auto& p : route_with_signal.reference_line )
+  {
+    if( p.first < current_s )
+      continue;
+
+    auto it = std::find_if( traffic_signals.signals.begin(), traffic_signals.signals.end(), [&]( const auto& kv ) {
+      const auto& signal = kv.second;
+
+      return adore::math::distance_2d( signal, p.second ) < 3.0;
+    } );
+
+    if( it != traffic_signals.signals.end() )
+    {
+      const auto& signal = it->second;
+
+      first_light_point.x = signal.x;
+      first_light_point.y = signal.y;
+      first_light_state   = signal.state;
+      found_light         = true;
+      break;
+    }
+  }
+
+  if( found_light )
+  {
+    double v = current_state.vx;
+
+    adore::math::Point2d ego;
+    ego.x = current_state.x;
+    ego.y = current_state.y;
+
+    double d_light = adore::math::distance_2d( ego, first_light_point ) - vehicle_params.body_length / 2;
+
+    // ================= PARAMETERS =================
+    const double a_comfort  = 1.5; // comfortable braking
+    const double t_reaction = 0.5;
+    const double buffer     = 3.0;
+
+    double d_reaction = v * t_reaction;
+    double d_brake    = v * v / ( 2.0 * a_comfort );
+
+    double d_required = d_reaction + d_brake + buffer;
+
+    bool should_stop = false;
+
+    if( first_light_state == 0 ) // RED
+    {
+      should_stop = true;
+    }
+    else if( first_light_state == 1 ) // YELLOW
+    {
+      // Stop if comfortable, otherwise continue
+      if( d_light > d_required || d_light / v > 2.5 )
+        should_stop = true;
+    }
+    else // GREEN
+    {
+      should_stop = false;
+    }
+
+    static bool latched_stop = false;
+
+    if( should_stop )
+      latched_stop = true;
+
+    if( first_light_state == 2 ) // GREEN resets
+      latched_stop = false;
+
+    should_stop = latched_stop;
+
+    // prevent creeping through red
+    if( d_light < 5.0 && v < 1.0 && first_light_state != 2 )
+    {
+      should_stop = true;
+    }
+
+    if( should_stop )
+    {
+      double distance_to_next_traffic_light = adore::math::distance_2d( current_state, first_light_point );
+      if( distance_to_next_traffic_light - previous_distance > 0.0 )
+        did_not_stop_at_traffic_light = true;
+      previous_distance = distance_to_next_traffic_light;
+      for( auto& p : route_with_signal.reference_line )
+      {
+        double d = adore::math::distance_2d( p.second, first_light_point );
+
+        if( d < 2.0 )
+        {
+          p.second.max_speed = 0.0;
+        }
+      }
+    }
+  }
+  return route_with_signal;
 }
 } // namespace planner
 } // namespace adore

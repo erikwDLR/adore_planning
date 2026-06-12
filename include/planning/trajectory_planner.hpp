@@ -28,6 +28,7 @@
 
 #include "dynamics/comfort_settings.hpp"
 #include "dynamics/traffic_participant.hpp"
+#include "dynamics/traffic_signal.hpp"
 #include "dynamics/trajectory.hpp"
 #include "multi_agent_solver/multi_agent_solver.hpp"
 #include "planning/speed_profiles.hpp"
@@ -45,18 +46,26 @@ public:
 
 
   dynamics::Trajectory plan_route_trajectory( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
-                                              const dynamics::TrafficParticipantSet& traffic_participants );
+                                              const dynamics::TrafficParticipantSet& traffic_participants,
+                                              const dynamics::TrafficSignalSet&      traffic_signals );
 
-  dynamics::Trajectory plan_route_trajectory_with_custom_comfort_settings( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
-                                            const dynamics::TrafficParticipantSet& traffic_participants, const dynamics::ComfortSettings custom_comfort_settings );
+  dynamics::Trajectory plan_route_trajectory_with_custom_comfort_settings( const map::Route&                      latest_route,
+                                                                           const dynamics::VehicleStateDynamic&   current_state,
+                                                                           const dynamics::TrafficParticipantSet& traffic_participants,
+                                                                           const dynamics::ComfortSettings        custom_comfort_settings,
+                                                                           const dynamics::TrafficSignalSet&      traffic_signals );
 
   dynamics::Trajectory optimize_trajectory( const dynamics::VehicleStateDynamic& current_state,
                                             const dynamics::Trajectory&          reference_trajectory,
                                             const dynamics::Trajectory&          initial_guess = dynamics::Trajectory() );
 
+  map::Route compute_traffic_light_behavior( const dynamics::VehicleStateDynamic& current_state, const map::Route& latest_route,
+                                             const dynamics::TrafficSignalSet& traffic_signals );
+
   void set_parameters( const std::map<std::string, double>& params );
   void set_vehicle_parameters( const dynamics::PhysicalVehicleParameters& params );
   void set_comfort_settings( const dynamics::ComfortSettings& settings );
+
   dynamics::PhysicalVehicleParameters get_physical_vehicle_parameters();
 
 private:
@@ -79,9 +88,10 @@ private:
     double acceleration   = 0.1;
   } weights;
 
-  double dt              = 0.1;
-  size_t horizon_steps   = 40;
-  double ref_traj_length = 100;
+  double dt                = 0.1;
+  size_t horizon_steps     = 40;
+  double ref_traj_length   = 100;
+  double previous_distance = 1000.0;
 
   std::shared_ptr<mas::OCP> problem;
   dynamics::Trajectory      reference_trajectory; // Reference trajectory for the planner
@@ -89,8 +99,8 @@ private:
 
   dynamics::VehicleStateDynamic start_state; // Current state of the vehicle
 
-  dynamics::PhysicalVehicleParameters        vehicle_params;
-  dynamics::ComfortSettings comfort_settings;
+  dynamics::PhysicalVehicleParameters vehicle_params;
+  dynamics::ComfortSettings           comfort_settings;
 
 
   void                   setup_problem();

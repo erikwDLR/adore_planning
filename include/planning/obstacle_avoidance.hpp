@@ -35,6 +35,13 @@ struct ObstacleAvoidanceParams
   double max_object_ahead             = 60.0;
   double max_static_object_speed      = 0.5;
 
+  // Hysteresis for obstacles that are already part of an active avoidance
+  // maneuver (ignored/expected ids): they stay ignored until their measured
+  // speed exceeds this value. Prevents tracker speed noise on a parked vehicle
+  // from turning it into a conflict right next to ego. Must be >=
+  // max_static_object_speed to have any effect.
+  double ignored_obstacle_release_speed = 1.5;
+
   // Detection corridor: obstacle is relevant only if its raw footprint intersects
   // [-0.5 * ego_width - ego_corridor_safety_margin, +0.5 * ego_width + ego_corridor_safety_margin].
   double ego_corridor_safety_margin       = 0.2;
@@ -84,7 +91,6 @@ struct ObstacleAvoidanceParams
   bool modified_route_safety_check_enabled = true;
   double modified_route_max_check_distance = 60.0;
   double modified_route_time_horizon = 12.0;
-  bool stop_on_modified_route_conflict = true;
 
   // --------------------------------------------------------------------------
   // Internal/advanced parameters
@@ -93,8 +99,12 @@ struct ObstacleAvoidanceParams
   // Plausibility filter for bad route projections / unrelated objects.
   double max_object_lateral_distance  = 8.0;
 
+  // Despite the name, this is the minimum s-distance ahead of ego at which the
+  // static-obstacle search window starts (not an overlap requirement).
   double min_obstacle_route_overlap   = 0.5;
   double min_oncoming_heading_diff    = 2.35; // rad, about 135 deg
+  // Time step for the synthetic hold trajectories built in the decision maker;
+  // not used by the planner library itself.
   double stop_time_step               = 0.1;
 
   // If left and right are equally good, prefer left. This matches right-hand traffic overtaking behavior.
@@ -236,6 +246,11 @@ struct ObstacleAvoidanceParams
   // Minimum speed threshold for participant motion detection. Speeds below this
   // are treated as static or negligible motion.
   double min_motion_speed = 0.05;
+
+  // Lower bound for the braking deceleration used in stop-distance and
+  // stop-profile calculations. Guards against an unset/implausible
+  // vehicle acceleration_min producing near-infinite braking distances.
+  double min_braking_deceleration = 0.5;
 
   // Adjustment offset added to front_clearance when stop_before_obstacle < front_clearance.
   // Ensures minimum safety distance to obstacles during emergency stop.
@@ -437,6 +452,10 @@ struct RouteCorridorCheckResult
   bool has_conflict = false;
   double ego_s = std::numeric_limits<double>::quiet_NaN();
   RouteCorridorConflict conflict;
+  // All conflicts found this cycle (conflict above is the most relevant one).
+  // Consumers that maintain per-obstacle memory must see every detection, not
+  // only the best one, so simultaneously visible obstacles do not age out.
+  std::vector<RouteCorridorConflict> conflicts;
   std::string reason;
 };
 

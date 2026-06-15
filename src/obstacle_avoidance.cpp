@@ -724,7 +724,7 @@ build_stop_route_before_obstacle(
    * It is expected to be negative, for example -1.5 m/s².
    */
   const double braking_deceleration =
-    std::max( params.min_motion_speed, std::fabs( vehicle_params.acceleration_min ) );
+    std::max( params.min_braking_deceleration, std::fabs( vehicle_params.acceleration_min ) );
 
   const double current_speed =
     std::max( 0.0, ego.vx );
@@ -894,11 +894,16 @@ project_obstacle_to_route_analytic( const map::Route& route,
   const double half_width =
     0.5 * std::max( params.min_vehicle_dimension, participant.physical_parameters.body_width );
 
-  const std::array<std::pair<double, double>, 4> local_corners = {{
+  // Corners plus the midpoints of the long edges: on curved routes the side of
+  // a long vehicle can reach closer to the reference line than either corner
+  // (sagitta error ~ L^2/8R); the midpoints bound that under-estimation.
+  const std::array<std::pair<double, double>, 6> local_corners = {{
     { -half_length, -half_width },
     { -half_length,  half_width },
     {  half_length,  half_width },
-    {  half_length, -half_width }
+    {  half_length, -half_width },
+    {          0.0,  half_width },
+    {          0.0, -half_width }
   }};
 
   bool any_valid_projection = false;
@@ -1298,7 +1303,8 @@ find_static_obstacle_group_on_route(
     return std::nullopt;
   }
 
-  const double ego_half_width = 0.5 * ego_params.body_width;
+  const double ego_half_width =
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const double ego_corridor_half_width =
     ego_half_width + params.ego_corridor_safety_margin;
 
@@ -1539,7 +1545,8 @@ find_reference_point_near_s( const map::Route& route, double query_s )
 std::optional<ParticipantFootprintOnRoute>
 project_participant_footprint_to_route(
   const map::Route& route,
-  const dynamics::TrafficParticipant& participant )
+  const dynamics::TrafficParticipant& participant,
+  const ObstacleAvoidanceParams& params )
 {
   if( route.reference_line.size() < 2 )
   {
@@ -1617,20 +1624,21 @@ project_participant_footprint_to_route(
 
   const double cos_yaw = std::cos( yaw );
   const double sin_yaw = std::sin( yaw );
-  const double min_vehicle_dimension =
-    ObstacleAvoidanceParams{}.min_vehicle_dimension;
-
   const double half_length =
-    0.5 * std::max( min_vehicle_dimension, participant.physical_parameters.body_length );
+    0.5 * std::max( params.min_vehicle_dimension, participant.physical_parameters.body_length );
 
   const double half_width =
-    0.5 * std::max( min_vehicle_dimension, participant.physical_parameters.body_width );
+    0.5 * std::max( params.min_vehicle_dimension, participant.physical_parameters.body_width );
 
-  const std::array<std::pair<double, double>, 4> local_corners = {{
+  // Corners plus long-edge midpoints; see project_obstacle_to_route_analytic
+  // for the curved-route rationale.
+  const std::array<std::pair<double, double>, 6> local_corners = {{
     { -half_length, -half_width },
     { -half_length,  half_width },
     {  half_length,  half_width },
-    {  half_length, -half_width }
+    {  half_length, -half_width },
+    {          0.0,  half_width },
+    {          0.0, -half_width }
   }};
 
   ParticipantFootprintOnRoute footprint;
@@ -1756,7 +1764,8 @@ find_ego_lane_oncoming_threat(
       continue;
     }
 
-    const auto footprint = project_participant_footprint_to_route( route, participant );
+    const auto footprint =
+      project_participant_footprint_to_route( route, participant, params );
     if( !footprint.has_value() )
     {
       continue;
@@ -2347,7 +2356,8 @@ check_oncoming_gap( const map::Route& route,
     if( avoidance_group_contains_participant_id(
           group,
           static_cast<int>( id ) ) &&
-        participant_speed <= params.max_static_object_speed )
+        participant_speed <= std::max( params.max_static_object_speed,
+                                       params.ignored_obstacle_release_speed ) )
     {
       continue;
     }
@@ -2369,7 +2379,7 @@ check_oncoming_gap( const map::Route& route,
     const bool heading_opposite =
       std::fabs( yaw_diff ) >= params.min_oncoming_heading_diff;
     const auto participant_footprint =
-      project_participant_footprint_to_route( route, participant );
+      project_participant_footprint_to_route( route, participant, params );
     const bool participant_in_conflict_interval =
       participant_footprint.has_value()
         ? ( participant_footprint->s_max >= result.conflict_start_s &&
@@ -2417,6 +2427,58 @@ check_oncoming_gap( const map::Route& route,
         }
 
         return result;
+      }
+
+      // Slow oncoming traffic that has not reached the conflict interval yet:
+      // its route-aligned speed is below min_oncoming_route_speed, so the main
+      // gap check below never sees it. A vehicle that is clearly heading
+      // against the route and approaching the interval must still pass the
+      // gap-acceptance test with a floored closing speed.
+      if( heading_opposite &&
+          participant_speed > params.max_static_object_speed &&
+          participant_s > result.conflict_end_s )
+      {
+        const double slow_closing_speed =
+          std::max( params.min_oncoming_speed_for_gap_check, std::fabs( v_route ) );
+        const double slow_front_s =
+          participant_footprint.has_value()
+            ? participant_footprint->s_min
+            : participant_s;
+        const double slow_arrival_time =
+          std::max( 0.0, slow_front_s - result.conflict_end_s ) / slow_closing_speed;
+
+        if( slow_arrival_time <=
+            result.ego_clear_time + params.oncoming_time_margin )
+        {
+          oncoming_detected = true;
+          result.conflict = true;
+          result.participant_id = static_cast<int>( id );
+          result.oncoming_arrival_time = slow_arrival_time;
+
+          char buf[384];
+          std::snprintf(
+            buf,
+            sizeof( buf ),
+            "participant id=%d slow oncoming (v_route=%.2f) arrival_time=%.2f <= ego_clear_time=%.2f + margin=%.2f, conflict=[%.2f, %.2f]",
+            static_cast<int>( id ),
+            v_route,
+            slow_arrival_time,
+            result.ego_clear_time,
+            params.oncoming_time_margin,
+            result.conflict_start_s,
+            result.conflict_end_s );
+          result.reason = buf;
+
+          std::fprintf(
+            stderr,
+            "[OA][ONCOMING] detected slow participant_id=%d collision_predicted=true arrival_time=%.2f ego_clear_time=%.2f\n",
+            static_cast<int>( id ),
+            slow_arrival_time,
+            result.ego_clear_time );
+          std::fflush( stderr );
+
+          return result;
+        }
       }
 
       if( params.debug_oncoming_check &&
@@ -4426,7 +4488,7 @@ RouteSpeedPolicy::apply_avoidance_speed_profile(
 
   const double target_v = std::max( 0.0, params.max_speed_during_avoidance );
   const double a_abs =
-    std::max( params.min_motion_speed, std::fabs( vehicle_params.acceleration_min ) );
+    std::max( params.min_braking_deceleration, std::fabs( vehicle_params.acceleration_min ) );
   std::size_t approach_points = 0;
   std::size_t capped_points = 0;
 
@@ -4501,7 +4563,7 @@ RouteSpeedPolicy::apply_stop_profile(
   }
 
   const double braking_deceleration =
-    std::max( params.min_motion_speed, std::fabs( vehicle_params.acceleration_min ) );
+    std::max( params.min_braking_deceleration, std::fabs( vehicle_params.acceleration_min ) );
   const double current_speed = std::max( 0.0, ego_v );
   const double available_distance = desired_stop_s - ego_s;
   const double required_braking_distance =
@@ -4681,7 +4743,22 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     }
     planner.set_allow_previous_trajectory_fallback( previous_fallback_allowed );
 
-    if( stop_result.trajectory.states.empty() )
+    // Validate that the planned trajectory actually stops before the obstacle;
+    // a non-empty trajectory alone does not guarantee a stop.
+    RouteCorridorConflict stop_conflict;
+    stop_conflict.participant_id = stop_obstacle.id;
+    stop_conflict.object_s_min = stop_obstacle.object_s_min;
+    stop_conflict.object_s_max = stop_obstacle.object_s_max;
+    stop_conflict.inflated_s_min = stop_obstacle.object_s_min;
+    stop_conflict.inflated_s_max = stop_obstacle.object_s_max;
+
+    if( stop_result.trajectory.states.empty() ||
+        !trajectory_stops_before_conflict(
+          stop_result.trajectory,
+          stop_result.modified_route,
+          stop_conflict,
+          vehicle_params,
+          params ) )
     {
       std::fprintf(
         stderr,
@@ -4711,13 +4788,19 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       }
       planner.set_allow_previous_trajectory_fallback( previous_fallback_allowed );
 
-      if( stop_result.trajectory.states.empty() )
+      if( stop_result.trajectory.states.empty() ||
+          !trajectory_stops_before_conflict(
+            stop_result.trajectory,
+            stop_result.modified_route,
+            stop_conflict,
+            vehicle_params,
+            params ) )
       {
         stop_result.success = false;
         stop_result.reason = "OA stop route planning failed";
         std::fprintf(
           stderr,
-          "[OA][STOP_ROUTE] maximum route-based braking failed; no valid route trajectory\n" );
+          "[OA][STOP_ROUTE] maximum route-based braking failed or did not stop before conflict; no valid route trajectory\n" );
         std::fflush( stderr );
         return stop_result;
       }
@@ -4957,7 +5040,8 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           candidate.modified_route,
           ego,
           ego_s_original,
-          candidate.params.route_window_min );
+          candidate.params.route_window_min,
+          candidate.params.max_projection_distance_from_route );
 
       if( !std::isfinite( candidate.ego_s_modified ) )
       {
@@ -5387,11 +5471,13 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     const auto original_footprint =
       project_participant_footprint_to_route(
         route,
-        participant_it->second );
+        participant_it->second,
+        params );
     const auto modified_footprint =
       project_participant_footprint_to_route(
         result.modified_route,
-        participant_it->second );
+        participant_it->second,
+        params );
 
     if( original_footprint.has_value() && modified_footprint.has_value() )
     {
@@ -5666,7 +5752,8 @@ check_route_corridor_safety(
     const bool ignored_active_obstacle =
       ignored_participant_ids != nullptr &&
       contains_participant_id( *ignored_participant_ids, participant_id ) &&
-      participant_speed <= params.max_static_object_speed;
+      participant_speed <= std::max( params.max_static_object_speed,
+                                     params.ignored_obstacle_release_speed );
 
     if( ignored_active_obstacle )
     {
@@ -5679,7 +5766,7 @@ check_route_corridor_safety(
     }
 
     const auto footprint =
-      project_participant_footprint_to_route( route_to_check, participant );
+      project_participant_footprint_to_route( route_to_check, participant, params );
 
     if( !footprint.has_value() )
     {
@@ -5825,7 +5912,8 @@ check_route_corridor_safety(
         const auto predicted_footprint =
           project_participant_footprint_to_route(
             route_to_check,
-            predicted_participant );
+            predicted_participant,
+            params );
 
         if( !predicted_footprint.has_value() )
         {
@@ -5871,7 +5959,8 @@ check_route_corridor_safety(
         const auto predicted_footprint =
           project_participant_footprint_to_route(
             route_to_check,
-            predicted_participant );
+            predicted_participant,
+            params );
 
         if( !predicted_footprint.has_value() )
         {
@@ -5927,7 +6016,8 @@ check_route_corridor_safety(
         const auto predicted_footprint =
           project_participant_footprint_to_route(
             route_to_check,
-            predicted_participant );
+            predicted_participant,
+            params );
 
         if( !predicted_footprint.has_value() )
         {
@@ -6052,6 +6142,7 @@ check_route_corridor_safety(
   result.safe = false;
   result.has_conflict = true;
   result.conflict = *best_it;
+  result.conflicts = conflicts;
 
   char buf[512];
   std::snprintf(
@@ -6092,7 +6183,6 @@ trajectory_stops_before_conflict(
     front_stop_s - ego_front_offset;
   const double collision_entry_s = conflict.object_s_min;
   constexpr double stopped_speed = 0.20;
-  (void)params;
 
   bool saw_state_before_conflict = false;
   double min_speed_before_conflict = std::numeric_limits<double>::infinity();
@@ -6138,7 +6228,16 @@ trajectory_stops_before_conflict(
   const double final_front_s = final_s + ego_front_offset;
   if( final_s < stop_s )
   {
-    return final_front_s < collision_entry_s;
+    // The trajectory horizon ends before the stop point. Accept it only if the
+    // remaining speed can still be braked away before the stop point; a
+    // trajectory that is merely "not there yet" but too fast does not stop.
+    const double a_abs =
+      std::max( params.min_braking_deceleration, std::fabs( ego_params.acceleration_min ) );
+    const double remaining_braking_distance =
+      final_state.vx * final_state.vx / ( 2.0 * a_abs );
+
+    return final_front_s < collision_entry_s &&
+           final_s + remaining_braking_distance <= stop_s;
   }
 
   const bool final_before_conflict =
@@ -6186,7 +6285,7 @@ plan_stop_on_route_before_corridor_conflict(
   const double stop_s =
     front_stop_s - ego_front_offset;
   const double deceleration =
-    std::max( params.min_motion_speed, std::fabs( vehicle_params.acceleration_min ) );
+    std::max( params.min_braking_deceleration, std::fabs( vehicle_params.acceleration_min ) );
   const double required_braking_distance =
     std::max( 0.0, ego.vx ) * std::max( 0.0, ego.vx ) /
     ( 2.0 * deceleration );
@@ -6452,7 +6551,8 @@ monitor_active_obstacle_avoidance_maneuver(
     const bool expected_active_obstacle =
       ( participant_id == maneuver.obstacle_id ||
         contains_participant_id( maneuver.obstacle_ids, participant_id ) ) &&
-      participant_speed <= params.max_static_object_speed;
+      participant_speed <= std::max( params.max_static_object_speed,
+                                     params.ignored_obstacle_release_speed );
 
     if( expected_active_obstacle )
     {
@@ -6478,7 +6578,7 @@ monitor_active_obstacle_avoidance_maneuver(
     const bool heading_opposite =
       std::fabs( yaw_diff ) >= params.min_oncoming_heading_diff;
     const auto participant_footprint =
-      project_participant_footprint_to_route( route, participant );
+      project_participant_footprint_to_route( route, participant, params );
     const bool participant_in_conflict_interval =
       participant_footprint.has_value()
         ? ( participant_footprint->s_max >= result.oncoming.conflict_start_s &&
@@ -6508,6 +6608,50 @@ monitor_active_obstacle_avoidance_maneuver(
         result.should_abort_before_commitment = !result.already_committed;
 
         return result;
+      }
+
+      // Slow oncoming traffic approaching the conflict interval: same gap
+      // logic as in check_oncoming_gap, with a floored closing speed, so the
+      // monitor does not ignore vehicles below min_oncoming_route_speed.
+      if( heading_opposite &&
+          participant_speed > params.max_static_object_speed &&
+          participant_s > result.oncoming.conflict_end_s )
+      {
+        const double slow_closing_speed =
+          std::max( params.min_oncoming_speed_for_gap_check, std::fabs( v_route ) );
+        const double slow_front_s =
+          participant_footprint.has_value()
+            ? participant_footprint->s_min
+            : participant_s;
+        const double slow_arrival_time =
+          std::max( 0.0, slow_front_s - result.oncoming.conflict_end_s ) /
+          slow_closing_speed;
+
+        if( slow_arrival_time <=
+            result.oncoming.ego_clear_time + params.oncoming_time_margin )
+        {
+          result.oncoming.conflict = true;
+          result.oncoming.participant_id = participant_id;
+          result.oncoming.oncoming_arrival_time = slow_arrival_time;
+
+          char buf[384];
+          std::snprintf(
+            buf,
+            sizeof( buf ),
+            "active OA monitor: participant id=%d slow oncoming (v_route=%.2f) arrival_time=%.2f <= ego_clear_time=%.2f + margin=%.2f, committed=%s",
+            participant_id,
+            v_route,
+            slow_arrival_time,
+            result.oncoming.ego_clear_time,
+            params.oncoming_time_margin,
+            result.already_committed ? "true" : "false" );
+          result.reason = buf;
+          result.oncoming.reason = buf;
+          result.safe_to_continue = false;
+          result.should_abort_before_commitment = !result.already_committed;
+
+          return result;
+        }
       }
 
       continue;

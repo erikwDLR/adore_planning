@@ -24,23 +24,6 @@ namespace planner
 namespace
 {
 
-const char*
-object_class_name( planner::RouteCorridorObjectClass object_class )
-{
-    switch( object_class )
-    {
-        case planner::RouteCorridorObjectClass::StaticOrSlow:
-            return "static_or_slow";
-        case planner::RouteCorridorObjectClass::Oncoming:
-            return "oncoming";
-        case planner::RouteCorridorObjectClass::SameDirection:
-            return "same_direction";
-        case planner::RouteCorridorObjectClass::CrossingOrUnknown:
-        default:
-            return "crossing_or_unknown";
-    }
-}
-
 // extra_l_margin widens the lateral match band. Ghost envelopes can stem from
 // projections onto different reference lines (original vs. laterally shifted
 // modified route); their l values then differ by up to the lateral shift, so
@@ -261,29 +244,10 @@ update_obstacle_ghost_memory(
                 original_obstacle ||
                 ( match_it->object_class == planner::RouteCorridorObjectClass::StaticOrSlow &&
                   match_it->seen_count >= 2 );
-            std::fprintf(
-                stderr,
-                "[OA][ghost] update matched old envelope with new participant id=%d old_id=%d hold_until_s=%.2f seen_count=%d\n",
-                detected_conflict.participant_id,
-                old_id,
-                updated.hold_until_s,
-                match_it->seen_count );
-            std::fflush( stderr );
         }
         else
         {
             state.ghost_memory.push_back( updated );
-            std::fprintf(
-                stderr,
-                "[OA][ghost] create participant id=%d class=%s s=[%.2f,%.2f] l=[%.2f,%.2f] hold_until_s=%.2f\n",
-                detected_conflict.participant_id,
-                object_class_name( updated.object_class ),
-                updated.object_s_min,
-                updated.object_s_max,
-                updated.object_l_min,
-                updated.object_l_max,
-                updated.hold_until_s );
-            std::fflush( stderr );
         }
     }
 
@@ -311,23 +275,6 @@ update_obstacle_ghost_memory(
                     std::isfinite( envelope.first_seen_time ) &&
                     now >= envelope.first_seen_time + std::max( params.ghost_obstacle_hold_time, params.ghost_obstacle_max_lifetime );
 
-                if( passed_release || timeout_release || lifetime_release )
-                {
-                    std::fprintf(
-                        stderr,
-                        "[OA][ghost] release %s ghost id=%d reason=%s ego_s=%.2f hold_until_s=%.2f missing_cycles=%d\n",
-                        object_class_name( envelope.object_class ),
-                        envelope.last_participant_id,
-                        passed_release
-                            ? "ego_passed_hold_until_s"
-                            : ( lifetime_release
-                                  ? "max_lifetime"
-                                  : "timeout_after_missing_detection" ),
-                        ego_s,
-                        envelope.hold_until_s,
-                        envelope.consecutive_missing_cycles );
-                    std::fflush( stderr );
-                }
                 return passed_release || timeout_release || lifetime_release;
             } ),
         state.ghost_memory.end() );
@@ -390,14 +337,6 @@ start_active_avoidance_state(
         if( original_envelope.has_value() )
         {
             state.ghost_memory.push_back( original_envelope.value() );
-            std::fprintf(
-                stderr,
-                "[OA][ghost] create original obstacle id=%d s=[%.2f,%.2f] hold_until_s=%.2f\n",
-                obstacle_id,
-                original_envelope->object_s_min,
-                original_envelope->object_s_max,
-                original_envelope->hold_until_s );
-            std::fflush( stderr );
         }
     }
 

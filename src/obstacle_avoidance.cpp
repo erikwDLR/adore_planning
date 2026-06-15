@@ -84,22 +84,6 @@ enum class ShiftDirection
   Right
 };
 
-const char*
-avoidance_candidate_type_name( AvoidanceCandidateType type )
-{
-  switch( type )
-  {
-    case AvoidanceCandidateType::InLane:
-      return "InLane";
-    case AvoidanceCandidateType::AdjacentSameDirection:
-      return "AdjacentSameDirection";
-    case AvoidanceCandidateType::OppositeDirection:
-      return "OppositeDirection";
-  }
-
-  return "Unknown";
-}
-
 struct ShiftCandidate
 {
   double shift = 0.0; // +left, -right
@@ -204,22 +188,6 @@ route_corridor_object_class_name( RouteCorridorObjectClass object_class )
     default:
       return "crossing_or_unknown";
   }
-}
-
-std::string
-ids_to_string( const std::vector<int>& ids )
-{
-  std::string text = "[";
-  for( std::size_t i = 0; i < ids.size(); ++i )
-  {
-    if( i > 0 )
-    {
-      text += ",";
-    }
-    text += std::to_string( ids[i] );
-  }
-  text += "]";
-  return text;
 }
 
 bool
@@ -689,19 +657,6 @@ build_stop_route_before_obstacle(
     return stop_route;
   }
 
-  std::fprintf(
-    stderr,
-    "[OA][STOP_ROUTE] building reachable stop profile ego_s=%.2f reference_stop_s=%.2f front_stop_s=%.2f object_s_min=%.2f v=%.2f braking_distance=%.2f safety_margin=%.2f reachability_margin=%.2f\n",
-    ego_s,
-    stop_s,
-    front_stop_s,
-    obstacle.object_s_min,
-    current_speed,
-    required_braking_distance,
-    reachability_margin,
-    hard_reachability_margin );
-  std::fflush( stderr );
-
   return RouteSpeedPolicy::apply_stop_profile(
     stop_route,
     ego_s,
@@ -928,26 +883,6 @@ project_obstacle_to_route_analytic( const map::Route& route,
             ? -corridor_half_width - envelope.object_l_max
             : 0.0 );
 
-  std::fprintf(
-    stderr,
-    "[OA] obstacle id=%d: center_s=%.2f center_l=%.2f rel_yaw=%.2f "
-    "raw_s=[%.2f, %.2f] raw_l=[%.2f, %.2f] corridor=[%.2f, %.2f] "
-    "distance_to_corridor=%.2f overlap=%s min_corner_distance=%.2f\n",
-    envelope.id,
-    center_s,
-    center_l,
-    rel_yaw,
-    envelope.object_s_min,
-    envelope.object_s_max,
-    envelope.object_l_min,
-    envelope.object_l_max,
-    -corridor_half_width,
-    corridor_half_width,
-    distance_to_corridor,
-    overlaps_ego_corridor ? "true" : "false",
-    min_corner_distance );
-  std::fflush( stderr );
-
   envelope.overlaps_ego_corridor = overlaps_ego_corridor;
 
   envelope.s_min = envelope.object_s_min;
@@ -1054,27 +989,11 @@ make_avoidance_groups_from_clusters(
 
     if( gap_s <= hard_merge_gap_s )
     {
-      std::fprintf(
-        stderr,
-        "[OA][group] hard-merge-profile gap=%.2f threshold=%.2f current_first_id=%d next_first_id=%d\n",
-        gap_s,
-        hard_merge_gap_s,
-        groups.back().envelope.id,
-        obstacle.id );
-      std::fflush( stderr );
 
       append_obstacle_to_avoidance_group( groups.back(), obstacle, params, true );
     }
     else if( gap_s <= shift_hull_gap_s )
     {
-      std::fprintf(
-        stderr,
-        "[OA][group] hull-link gap=%.2f threshold=%.2f current_first_id=%d next_first_id=%d\n",
-        gap_s,
-        shift_hull_gap_s,
-        groups.back().envelope.id,
-        obstacle.id );
-      std::fflush( stderr );
 
       append_obstacle_to_avoidance_group( groups.back(), obstacle, params, false );
     }
@@ -1085,22 +1004,6 @@ make_avoidance_groups_from_clusters(
   }
 
   return groups;
-}
-
-const char*
-avoidance_group_mode_string( const AvoidanceGroup& group )
-{
-  if( group.uses_hull_curve )
-  {
-    return "hull";
-  }
-
-  if( group.hard_merged || group.envelope.object_count > 1 )
-  {
-    return "hard_merge";
-  }
-
-  return "separate";
 }
 
 bool
@@ -1268,11 +1171,6 @@ find_static_obstacle_group_on_route(
             participant,
             params ) ) )
     {
-      std::fprintf(
-        stderr,
-        "[OA] skip participant id=%d as static obstacle: participant is moving traffic\n",
-        id );
-      std::fflush( stderr );
       continue;
     }
 
@@ -1300,25 +1198,11 @@ find_static_obstacle_group_on_route(
 
     if( opposite_heading && !env.overlaps_ego_corridor )
     {
-      std::fprintf(
-        stderr,
-        "[OA][filter] skip obstacle id=%d reason=opposite lane object not ego obstacle\n",
-        env.id );
-      std::fflush( stderr );
       continue;
     }
 
     if( !env.overlaps_ego_corridor )
     {
-      std::fprintf(
-        stderr,
-        "[OA][filter] skip id=%d reason=no ego corridor overlap raw_l=[%.2f,%.2f] corridor=[%.2f,%.2f]\n",
-        env.id,
-        env.object_l_min,
-        env.object_l_max,
-        -ego_corridor_half_width,
-        ego_corridor_half_width );
-      std::fflush( stderr );
       continue;
     }
 
@@ -1356,36 +1240,11 @@ find_static_obstacle_group_on_route(
   if( !params.clustering_enabled )
   {
     const auto& nearest = obstacles.front();
-    std::fprintf(
-      stderr,
-      "[OA][cluster] disabled; using nearest ego obstacle only id=%d s=[%.2f,%.2f] l=[%.2f,%.2f]\n",
-      nearest.id,
-      nearest.object_s_min,
-      nearest.object_s_max,
-      nearest.object_l_min,
-      nearest.object_l_max );
-    std::fflush( stderr );
 
     return make_avoidance_group_from_obstacle( nearest );
   }
 
   auto groups = make_avoidance_groups_from_clusters( obstacles, params );
-
-  // Log clustering decision
-  if( params.clustering_enabled && obstacles.size() > 1 )
-  {
-    std::fprintf(
-      stderr,
-      "[OA][cluster] enabled; selected count=%zu ids=[",
-      obstacles.size() );
-    for( std::size_t i = 0; i < obstacles.size(); ++i )
-    {
-      if( i > 0 ) std::fprintf( stderr, "," );
-      std::fprintf( stderr, "%d", obstacles[i].id );
-    }
-    std::fprintf( stderr, "]\n" );
-    std::fflush( stderr );
-  }
 
   std::optional<AvoidanceGroup> best_group;
   double best_distance_s = std::numeric_limits<double>::infinity();
@@ -1423,18 +1282,6 @@ find_static_obstacle_group_on_route(
       best_group->envelope.object_s_max +
       params.rear_clearance;
 
-    std::fprintf(
-      stderr,
-      "[OA][group] selected count=%zu ids=%s mode=%s raw_s=[%.2f, %.2f] raw_l=[%.2f, %.2f] release_s=%.2f\n",
-      best_group->envelope.object_count,
-      ids_to_string( best_group->envelope.participant_ids ).c_str(),
-      avoidance_group_mode_string( best_group.value() ),
-      best_group->envelope.object_s_min,
-      best_group->envelope.object_s_max,
-      best_group->envelope.object_l_min,
-      best_group->envelope.object_l_max,
-      release_s );
-    std::fflush( stderr );
   }
 
   return best_group;
@@ -2121,15 +1968,6 @@ check_oncoming_gap( const map::Route& route,
   {
     result.reason = conflict_interval.reason;
 
-    if( params.debug_oncoming_check )
-    {
-      std::fprintf(
-        stderr,
-        "[OA][oncoming] ACCEPT: no opposite-lane occupancy (%s)\n",
-        result.reason.c_str() );
-      std::fflush( stderr );
-    }
-
     return result;
   }
 
@@ -2155,14 +1993,6 @@ check_oncoming_gap( const map::Route& route,
       + params.rear_clearance
       + params.oncoming_safety_distance_front;
 
-    if( params.debug_oncoming_check )
-    {
-      std::fprintf(
-        stderr,
-        "[OA][oncoming] warning: using obstacle-envelope fallback conflict interval: %s\n",
-        conflict_interval.reason.c_str() );
-      std::fflush( stderr );
-    }
   }
 
   if( candidate_ego_trajectory != nullptr )
@@ -2196,20 +2026,6 @@ check_oncoming_gap( const map::Route& route,
       std::max( params.min_ego_speed_for_gap_check, ego_speed );
 
     result.ego_clear_time = conflict_distance / ego_speed;
-  }
-
-  if( params.debug_oncoming_check )
-  {
-    std::fprintf(
-      stderr,
-      "[OA][oncoming] ego_s=%.2f conflict=[%.2f, %.2f] ego_clear_time=%.2f source=%s clear_source=%s\n",
-      ego_s,
-      result.conflict_start_s,
-      result.conflict_end_s,
-      result.ego_clear_time,
-      conflict_interval.valid ? conflict_interval.reason.c_str() : "fallback",
-      candidate_ego_trajectory != nullptr ? "trajectory_or_fallback" : "kinematic_fallback" );
-    std::fflush( stderr );
   }
 
   bool oncoming_detected = false;
@@ -2262,16 +2078,6 @@ check_oncoming_gap( const map::Route& route,
         result.participant_id = static_cast<int>( id );
         result.oncoming_arrival_time = 0.0;
 
-        std::fprintf(
-          stderr,
-          "[OA][ONCOMING] detected participant_id=%d collision_predicted=true arrival_time=0.00 ego_clear_time=%.2f\n",
-          static_cast<int>( id ),
-          result.ego_clear_time );
-        std::fprintf(
-          stderr,
-          "[OA][ONCOMING] collision predicted; braking/waiting\n" );
-        std::fflush( stderr );
-
         char buf[384];
         std::snprintf(
           buf,
@@ -2281,15 +2087,6 @@ check_oncoming_gap( const map::Route& route,
           result.conflict_start_s,
           result.conflict_end_s );
         result.reason = buf;
-
-        if( params.debug_oncoming_check )
-        {
-          std::fprintf(
-            stderr,
-            "[OA][oncoming] REJECT: %s\n",
-            result.reason.c_str() );
-          std::fflush( stderr );
-        }
 
         return result;
       }
@@ -2334,29 +2131,10 @@ check_oncoming_gap( const map::Route& route,
             result.conflict_end_s );
           result.reason = buf;
 
-          std::fprintf(
-            stderr,
-            "[OA][ONCOMING] detected slow participant_id=%d collision_predicted=true arrival_time=%.2f ego_clear_time=%.2f\n",
-            static_cast<int>( id ),
-            slow_arrival_time,
-            result.ego_clear_time );
-          std::fflush( stderr );
-
           return result;
         }
       }
 
-      if( params.debug_oncoming_check &&
-          participant_speed > params.max_static_object_speed )
-      {
-        std::fprintf(
-          stderr,
-          "[OA][oncoming] participant id=%d s=%.2f v_route=%.2f (not oncoming)\n",
-          static_cast<int>( id ),
-          participant_s,
-          v_route );
-        std::fflush( stderr );
-      }
       continue;
     }
 
@@ -2391,16 +2169,6 @@ check_oncoming_gap( const map::Route& route,
         arrival_source = "trajectory";
         used_trajectory = true;
       }
-      else if( params.debug_oncoming_check )
-      {
-        std::fprintf(
-          stderr,
-          "[OA][oncoming] participant id=%d trajectory has %zu states but does not enter conflict interval; "
-          "falling back to constant-velocity prediction\n",
-          static_cast<int>( id ),
-          participant.trajectory->states.size() );
-        std::fflush( stderr );
-      }
     }
 
     if( !used_trajectory )
@@ -2424,17 +2192,6 @@ check_oncoming_gap( const map::Route& route,
       {
         // participant_s < conflict_start_s and v_route < 0: the participant has
         // already passed the conflict interval and continues moving away from it.
-        if( params.debug_oncoming_check )
-        {
-          std::fprintf(
-            stderr,
-            "[OA][oncoming] participant id=%d s=%.2f already passed conflict interval [%.2f, %.2f]\n",
-            static_cast<int>( id ),
-            participant_s,
-            result.conflict_start_s,
-            result.conflict_end_s );
-          std::fflush( stderr );
-        }
         continue;
       }
     }
@@ -2443,35 +2200,7 @@ check_oncoming_gap( const map::Route& route,
         arrival_time > params.prediction_time_horizon &&
         result.ego_clear_time + params.oncoming_time_margin <= params.prediction_time_horizon )
     {
-      if( params.debug_oncoming_check )
-      {
-        std::fprintf(
-          stderr,
-          "[OA][oncoming] participant id=%d arrival_time=%.2f beyond prediction_horizon=%.2f\n",
-          static_cast<int>( id ),
-          arrival_time,
-          params.prediction_time_horizon );
-        std::fflush( stderr );
-      }
       continue;
-    }
-
-    if( params.debug_oncoming_check )
-    {
-      std::fprintf(
-        stderr,
-        "[OA][oncoming] participant id=%d s=%.2f yaw_diff=%.2f v_route=%.2f (oncoming) "
-        "source=%s distance_to_conflict=%.2f arrival_time=%.2f ego_clear_time=%.2f margin=%.2f\n",
-        static_cast<int>( id ),
-        participant_s,
-        yaw_diff,
-        v_route,
-        arrival_source,
-        distance_to_conflict,
-        arrival_time,
-        result.ego_clear_time,
-        params.oncoming_time_margin );
-      std::fflush( stderr );
     }
 
     const double required_arrival_time =
@@ -2482,17 +2211,6 @@ check_oncoming_gap( const map::Route& route,
       result.conflict = true;
       result.participant_id = static_cast<int>( id );
       result.oncoming_arrival_time = arrival_time;
-
-      std::fprintf(
-        stderr,
-        "[OA][ONCOMING] detected participant_id=%d collision_predicted=true arrival_time=%.2f ego_clear_time=%.2f\n",
-        static_cast<int>( id ),
-        arrival_time,
-        result.ego_clear_time );
-      std::fprintf(
-        stderr,
-        "[OA][ONCOMING] collision predicted; braking/waiting\n" );
-      std::fflush( stderr );
 
       if( params.debug_oncoming_check )
       {
@@ -2520,43 +2238,15 @@ check_oncoming_gap( const map::Route& route,
         result.conflict_end_s );
       result.reason = buf;
 
-      if( params.debug_oncoming_check )
-      {
-        std::fprintf(
-          stderr,
-          "[OA][oncoming] REJECT: %s\n",
-          result.reason.c_str() );
-        std::fflush( stderr );
-      }
-
       return result;
     }
 
-    std::fprintf(
-      stderr,
-      "[OA][ONCOMING] detected participant_id=%d collision_predicted=false arrival_time=%.2f ego_clear_time=%.2f\n",
-      static_cast<int>( id ),
-      arrival_time,
-      result.ego_clear_time );
-    std::fprintf(
-      stderr,
-      "[OA][ONCOMING] no collision predicted; continuing overtake\n" );
-    std::fflush( stderr );
   }
 
   result.conflict = false;
   result.reason = oncoming_detected
     ? "oncoming detected but no collision predicted"
     : "no oncoming conflict detected";
-
-  if( params.debug_oncoming_check )
-  {
-    std::fprintf(
-      stderr,
-      "[OA][oncoming] ACCEPT: %s\n",
-      result.reason.c_str() );
-    std::fflush( stderr );
-  }
 
   return result;
 }
@@ -3328,32 +3018,11 @@ candidate_respects_drivable_area( const map::Route& route,
 
     if( !allowed_interval.has_value() )
     {
-      std::fprintf(
-        stderr,
-        "[OA] reject shift=%.2f at route_s=%.2f: no usable lane boundaries for lane_id=%zu\n",
-        lateral_shift,
-        route_s,
-        route_point.parent_id );
-      std::fflush( stderr );
       return false;
     }
 
     if( ego_min_l < allowed_interval->min_l || ego_max_l > allowed_interval->max_l )
     {
-      std::fprintf(
-        stderr,
-        "[OA] reject shift=%.2f at route_s=%.2f: ego_l=[%.2f, %.2f] outside allowed_l=[%.2f, %.2f], adjacent_allowed=%s body_width=%.2f drivable_margin=%.2f lane_id=%zu boundary_source=map_lane_borders\n",
-        lateral_shift,
-        route_s,
-        ego_min_l,
-        ego_max_l,
-        allowed_interval->min_l,
-        allowed_interval->max_l,
-        allow_adjacent_driving_lanes ? "true" : "false",
-        ego_params.body_width,
-        0.0,
-        route_point.parent_id );
-      std::fflush( stderr );
 
       if( !allow_adjacent_driving_lanes )
       {
@@ -3374,27 +3043,6 @@ candidate_respects_drivable_area( const map::Route& route,
             lateral_shift > 0.0,
             params );
 
-        std::fprintf(
-          stderr,
-          "[OA][candidate][%s_shift_diag] shift=%.2f route_s=%.2f ego_l=[%.2f,%.2f] current_allowed_l=[%.2f,%.2f] adjacent_same_or_connected_available=%s adjacent_allowed_l=[%.2f,%.2f] opposite_available=%s opposite_allowed_l=[%.2f,%.2f] map_usable=%s reason=%s\n",
-          lateral_shift > 0.0 ? "left" : "right",
-          lateral_shift,
-          route_s,
-          ego_min_l,
-          ego_max_l,
-          allowed_interval->min_l,
-          allowed_interval->max_l,
-          ( adjacent_interval.has_value() &&
-            adjacent_interval->min_l <= ego_min_l &&
-            adjacent_interval->max_l >= ego_max_l ) ? "true" : "false",
-          adjacent_interval.has_value() ? adjacent_interval->min_l : std::numeric_limits<double>::quiet_NaN(),
-          adjacent_interval.has_value() ? adjacent_interval->max_l : std::numeric_limits<double>::quiet_NaN(),
-          opposite_query.has_opposite_lane ? "true" : "false",
-          opposite_query.has_opposite_lane ? opposite_query.interval.min_l : std::numeric_limits<double>::quiet_NaN(),
-          opposite_query.has_opposite_lane ? opposite_query.interval.max_l : std::numeric_limits<double>::quiet_NaN(),
-          opposite_query.map_usable ? "true" : "false",
-          opposite_query.reason.c_str() );
-        std::fflush( stderr );
       }
       return false;
     }
@@ -3428,29 +3076,12 @@ make_candidate_from_obstacle_hulls(
         ? obs.object_l_max + params.side_clearance + ego_half_width
         : obs.object_l_min - params.side_clearance - ego_half_width;
 
-    std::fprintf(
-      stderr,
-      "[OA][hull] %s required shift from obstacle id=%d l_%s=%.2f required=%.2f\n",
-      shift_left ? "left" : "right",
-      obs.id,
-      shift_left ? "max" : "min",
-      shift_left ? obs.object_l_max : obs.object_l_min,
-      required_for_obs );
-    std::fflush( stderr );
-
     required_shift =
       shift_left
         ? std::max( required_shift, required_for_obs )
         : std::min( required_shift, required_for_obs );
     ++hull_count;
   }
-
-  std::fprintf(
-    stderr,
-    "[OA][hull] selected constant shift=%.2f from individual obstacle hulls count=%zu\n",
-    required_shift,
-    hull_count );
-  std::fflush( stderr );
 
   return ShiftCandidate{
     required_shift,
@@ -3473,11 +3104,6 @@ candidate_respects_opposite_direction_area(
 
   if( !params.opposite_lane_enabled )
   {
-    std::fprintf(
-      stderr,
-      "[OA][candidate][opposite_lane] reject shift=%.2f reason=opposite lanes disabled\n",
-      lateral_shift );
-    std::fflush( stderr );
     return false;
   }
 
@@ -3512,16 +3138,6 @@ candidate_respects_opposite_direction_area(
 
     if( !opposite_query.map_usable || !opposite_query.has_opposite_lane )
     {
-      std::fprintf(
-        stderr,
-        "[OA][candidate][opposite_lane] reject shift=%.2f side=%s route_s=%.2f map_usable=%s has_opposite_lane=%s reason=%s\n",
-        lateral_shift,
-        shift_left ? "left" : "right",
-        route_s,
-        opposite_query.map_usable ? "true" : "false",
-        opposite_query.has_opposite_lane ? "true" : "false",
-        opposite_query.reason.c_str() );
-      std::fflush( stderr );
       return false;
     }
 
@@ -3543,19 +3159,6 @@ candidate_respects_opposite_direction_area(
 
     if( ego_min_l < allowed_min_l || ego_max_l > allowed_max_l )
     {
-      std::fprintf(
-        stderr,
-        "[OA][candidate][opposite_lane] reject shift=%.2f side=%s route_s=%.2f ego_l=[%.2f,%.2f] outside current_plus_opposite_l=[%.2f,%.2f] opposite_l=[%.2f,%.2f] reason=ego footprint outside opposite-lane maneuver corridor\n",
-        lateral_shift,
-        shift_left ? "left" : "right",
-        route_s,
-        ego_min_l,
-        ego_max_l,
-        allowed_min_l,
-        allowed_max_l,
-        opposite_query.interval.min_l,
-        opposite_query.interval.max_l );
-      std::fflush( stderr );
       return false;
     }
   }
@@ -3587,12 +3190,6 @@ evaluate_shift_candidate( ShiftCandidate& candidate,
       return;
     }
 
-    std::fprintf(
-      stderr,
-      "[OA] reject shift=%.2f type=%s: drivable-area enforcement is disabled or maneuver is not allowed\n",
-      candidate.shift,
-      avoidance_candidate_type_name( candidate.type ) );
-    std::fflush( stderr );
     candidate.valid = false;
     return;
   }
@@ -3603,11 +3200,6 @@ evaluate_shift_candidate( ShiftCandidate& candidate,
 
     if( !params.opposite_lane_enabled )
     {
-      std::fprintf(
-        stderr,
-        "[OA] reject shift=%.2f type=OppositeDirection: opposite_lane_enabled=false\n",
-        candidate.shift );
-      std::fflush( stderr );
       candidate.valid = false;
       return;
     }
@@ -3643,23 +3235,12 @@ evaluate_shift_candidate( ShiftCandidate& candidate,
 
   if( candidate.type == AvoidanceCandidateType::InLane )
   {
-    std::fprintf(
-      stderr,
-      "[OA] reject shift=%.2f type=InLane: would leave current lane\n",
-      candidate.shift );
-    std::fflush( stderr );
     candidate.valid = false;
     return;
   }
 
   if( !params.adjacent_lane_enabled )
   {
-    std::fprintf(
-      stderr,
-      "[OA] reject shift=%.2f type=%s: would leave current lane, but adjacent_lane_enabled=false\n",
-      candidate.shift,
-      avoidance_candidate_type_name( candidate.type ) );
-    std::fflush( stderr );
     candidate.valid = false;
     return;
   }
@@ -3675,11 +3256,6 @@ evaluate_shift_candidate( ShiftCandidate& candidate,
         same_direction_params,
         true ) )
   {
-    std::fprintf(
-      stderr,
-      "[OA] reject shift=%.2f type=AdjacentSameDirection: outside connected same-direction driving-lane drivable area\n",
-      candidate.shift );
-    std::fflush( stderr );
     candidate.valid = false;
   }
 }
@@ -3763,11 +3339,6 @@ generate_opposite_lane_candidate_variants(
 
   if( !params.opposite_lane_enabled )
   {
-    std::fprintf(
-      stderr,
-      "[OA][stage][opposite_lane] skipped: opposite_lane_enabled=%s\n",
-      params.opposite_lane_enabled ? "true" : "false" );
-    std::fflush( stderr );
     return candidates;
   }
 
@@ -3836,19 +3407,6 @@ generate_opposite_lane_candidate_variants(
           shift_left,
           params );
 
-      std::fprintf(
-        stderr,
-        "[OA][candidate][opposite_lane] side=%s sample_s=%.2f route_s=%.2f map_usable=%s has_opposite_lane=%s interval=[%.2f,%.2f] reason=%s\n",
-        shift_left ? "left" : "right",
-        sample_s,
-        route_point->first,
-        opposite_query.map_usable ? "true" : "false",
-        opposite_query.has_opposite_lane ? "true" : "false",
-        opposite_query.has_opposite_lane ? opposite_query.interval.min_l : std::numeric_limits<double>::quiet_NaN(),
-        opposite_query.has_opposite_lane ? opposite_query.interval.max_l : std::numeric_limits<double>::quiet_NaN(),
-        opposite_query.reason.c_str() );
-      std::fflush( stderr );
-
       if( !opposite_query.map_usable || !opposite_query.has_opposite_lane )
       {
         all_samples_usable = false;
@@ -3872,12 +3430,6 @@ generate_opposite_lane_candidate_variants(
 
     if( !all_samples_usable || !initialized )
     {
-      std::fprintf(
-        stderr,
-        "[OA][candidate][opposite_lane] no candidate side=%s reason=%s\n",
-        shift_left ? "left" : "right",
-        last_reason.empty() ? "opposite lane unavailable" : last_reason.c_str() );
-      std::fflush( stderr );
       continue;
     }
 
@@ -3888,15 +3440,6 @@ generate_opposite_lane_candidate_variants(
 
     if( center_l_min > center_l_max )
     {
-      std::fprintf(
-        stderr,
-        "[OA][candidate][opposite_lane] no candidate side=%s reason=ego footprint does not fit opposite interval center_l_range=[%.2f,%.2f] opposite_l=[%.2f,%.2f]\n",
-        shift_left ? "left" : "right",
-        center_l_min,
-        center_l_max,
-        opposite_intersection.min_l,
-        opposite_intersection.max_l );
-      std::fflush( stderr );
       continue;
     }
 
@@ -3947,28 +3490,8 @@ generate_opposite_lane_candidate_variants(
       append_unique_candidate( shift );
       ++generated_for_side;
 
-      std::fprintf(
-        stderr,
-        "[OA][candidate][opposite_lane] generated side=%s shift=%.2f ego_l=[%.2f,%.2f] opposite_l=[%.2f,%.2f] obstacle_l=[%.2f,%.2f]\n",
-        shift_left ? "left" : "right",
-        shift,
-        shift - ego_half_width - required_lane_margin,
-        shift + ego_half_width + required_lane_margin,
-        opposite_intersection.min_l,
-        opposite_intersection.max_l,
-        obstacle_clear_center_l - ego_half_width - params.side_clearance,
-        obstacle_clear_center_l + ego_half_width + params.side_clearance );
-      std::fflush( stderr );
     }
 
-    if( generated_for_side == 0 )
-    {
-      std::fprintf(
-        stderr,
-        "[OA][candidate][opposite_lane] no candidate side=%s reason=no valid signed shift in opposite interval\n",
-        shift_left ? "left" : "right" );
-      std::fflush( stderr );
-    }
   }
 
   return candidates;
@@ -4178,26 +3701,11 @@ validate_planned_shift_trajectory(
         const double obstacle_lateral_margin =
           actual_clearance - required_clearance;
 
-        std::fprintf(
-          stderr,
-          "[OA][candidate][clearance] id=%d actual=%.2f required_side_clearance=%.2f\n",
-          obstacle.id,
-          actual_clearance,
-          required_clearance );
-        std::fflush( stderr );
-
         result.min_obstacle_lateral_margin =
           std::min( result.min_obstacle_lateral_margin, obstacle_lateral_margin );
 
         if( obstacle_lateral_margin < 0.0 )
         {
-          std::fprintf(
-            stderr,
-            "[OA][candidate][reject] reason=side_clearance id=%d actual=%.2f required=%.2f\n",
-            obstacle.id,
-            actual_clearance,
-            required_clearance );
-          std::fflush( stderr );
 
           char buf[256];
           std::snprintf(
@@ -4282,19 +3790,6 @@ build_modified_avoidance_route( const map::Route& route,
     if( std::fabs( offset ) <= 1e-6 )
     {
       continue;
-    }
-
-    if( group.uses_hull_curve )
-    {
-      std::fprintf(
-        stderr,
-        "[OA][hull] s=%.2f alpha=%.3f actual_offset=%.3f nominal_shift=%.3f source=%s\n",
-        s,
-        alpha,
-        offset,
-        lateral_shift,
-        alpha_sample.source );
-      std::fflush( stderr );
     }
 
     // Important: use the original route as reference frame.
@@ -4388,23 +3883,6 @@ RouteSpeedPolicy::apply_avoidance_speed_profile(
       ++capped_points;
     }
   }
-
-  std::fprintf(
-    stderr,
-    "[OA][SPEED_PROFILE] avoidance speed approach profile to shift_start_s ego_s=%.2f shift_start_s=%.2f target_v=%.2f a_abs=%.2f points=%zu\n",
-    ego_s,
-    shift_start_s,
-    target_v,
-    a_abs,
-    approach_points );
-  std::fprintf(
-    stderr,
-    "[OA][SPEED_PROFILE] avoidance speed cap inside maneuver shift_start_s=%.2f maneuver_end_s=%.2f max_speed=%.2f points=%zu\n",
-    shift_start_s,
-    maneuver_end_s,
-    target_v,
-    capped_points );
-  std::fflush( stderr );
 
   return profiled_route;
 }
@@ -4563,16 +4041,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     const double stop_s =
       front_stop_s - ego_front_offset;
 
-    std::fprintf(
-      stderr,
-      "[OA][WAIT_BEFORE_OVERTAKE] reference_stop_s=%.2f front_stop_s=%.2f shift_start_s=%.2f object_s_min=%.2f reason=%s\n",
-      stop_s,
-      front_stop_s,
-      shift_start_s,
-      stop_obstacle.object_s_min,
-      reason.c_str() );
-    std::fflush( stderr );
-
     stop_result.modified_route =
       build_stop_route_before_obstacle(
         route,
@@ -4587,10 +4055,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     const bool previous_fallback_allowed =
       planner.get_allow_previous_trajectory_fallback();
     planner.set_allow_previous_trajectory_fallback( false );
-    std::fprintf(
-      stderr,
-      "[OA][STOP_ROUTE] previous trajectory fallback disabled for OA stop\n" );
-    std::fflush( stderr );
     try
     {
       stop_result.trajectory = planner.plan_route_trajectory(
@@ -4670,10 +4134,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
         return stop_result;
       }
 
-      std::fprintf(
-        stderr,
-        "[OA][STOP_ROUTE] maximum route-based braking trajectory accepted\n" );
-      std::fflush( stderr );
     }
 
     stop_result.trajectory.label = reason;
@@ -4778,13 +4238,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       in_lane_shift_variants.begin(),
       in_lane_shift_variants.end() );
   }
-  else
-  {
-    std::fprintf(
-      stderr,
-      "[OA][candidate] skipped type=InLane because in_lane_shift_enabled=false\n" );
-    std::fflush( stderr );
-  }
 
   if( params.adjacent_lane_enabled )
   {
@@ -4792,13 +4245,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       shift_variants.end(),
       adjacent_same_direction_shift_variants.begin(),
       adjacent_same_direction_shift_variants.end() );
-  }
-  else
-  {
-    std::fprintf(
-      stderr,
-      "[OA][candidate] skipped type=AdjacentSameDirection because adjacent_lane_enabled=false\n" );
-    std::fflush( stderr );
   }
 
   if( params.opposite_lane_enabled )
@@ -4808,26 +4254,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       opposite_lane_shift_variants.begin(),
       opposite_lane_shift_variants.end() );
   }
-  else
-  {
-    if( !opposite_lane_shift_variants.empty() )
-    {
-      std::fprintf(
-        stderr,
-        "[OA][candidate] skipped type=OppositeDirection count=%zu because opposite_lane_enabled=false\n",
-        opposite_lane_shift_variants.size() );
-      std::fflush( stderr );
-    }
-  }
-
-  std::fprintf(
-    stderr,
-    "[OA][stage][summary] in_lane=%zu same_direction_adjacent=%zu opposite_lane=%zu total=%zu\n",
-    in_lane_shift_variants.size(),
-    adjacent_same_direction_shift_variants.size(),
-    opposite_lane_shift_variants.size(),
-    shift_variants.size() );
-  std::fflush( stderr );
 
   for( const auto& raw_shift : shift_variants )
   {
@@ -4882,15 +4308,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
               candidate.params )
           : OppositeLaneConflictInterval{};
 
-      std::fprintf(
-        stderr,
-        "[OA][candidate] evaluate type=%s shift=%.2f in_lane=%s uses_opposite=%s\n",
-        avoidance_candidate_type_name( candidate.shift_candidate.type ),
-        candidate.shift_candidate.shift,
-        candidate.shift_candidate.in_lane ? "true" : "false",
-        candidate.uses_opposite_lane ? "true" : "false" );
-      std::fflush( stderr );
-
       candidate.modified_route =
         build_modified_avoidance_route(
           route,
@@ -4941,12 +4358,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           describe_candidate_rejection(
             candidate,
             std::string( "candidate rejected: planner exception: " ) + e.what() );
-        std::fprintf(
-          stderr,
-          "[OA][candidate] reject shift=%.2f reason=planner_exception exception=%s\n",
-          candidate.shift_candidate.shift,
-          e.what() );
-        std::fflush( stderr );
         continue;
       }
 
@@ -5004,15 +4415,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           vehicle_params,
           candidate.params );
 
-      if( ignore_other_lane_oncoming )
-      {
-        std::fprintf(
-          stderr,
-          "[OA][candidate][final_safety] ignore oncoming other-lane conflict for in-lane shift id=%d actual_clearance>=side_clearance\n",
-          candidate_route_safety.conflict.participant_id );
-        std::fflush( stderr );
-      }
-
       if( ( candidate_route_safety.has_conflict || !candidate_route_safety.safe ) &&
           !ignore_other_lane_oncoming )
       {
@@ -5023,42 +4425,8 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
             "candidate rejected by final active-route safety check: " +
               candidate_route_safety.reason );
 
-        std::fprintf(
-          stderr,
-          "[OA][candidate][final_safety] safe=false reject shift=%.2f id=%d class=%s type=%s s=[%.2f,%.2f] l=[%.2f,%.2f] dist=%.2f ttc=%.2f reason=%s\n",
-          candidate.shift_candidate.shift,
-          candidate_route_safety.conflict.participant_id,
-          route_corridor_object_class_name( candidate_route_safety.conflict.object_class ),
-          candidate_route_safety.conflict.reason.c_str(),
-          candidate_route_safety.conflict.object_s_min,
-          candidate_route_safety.conflict.object_s_max,
-          candidate_route_safety.conflict.object_l_min,
-          candidate_route_safety.conflict.object_l_max,
-          candidate_route_safety.conflict.distance_s,
-          candidate_route_safety.conflict.time_to_conflict,
-          candidate_route_safety.reason.c_str() );
-        std::fflush( stderr );
-
-        if( candidate_route_safety.conflict.predicted_spatiotemporal_conflict )
-        {
-          std::fprintf(
-            stderr,
-            "[OA][CANDIDATE_REJECT] reason=predicted_modified_route_conflict participant_id=%d t=%.2f conflict_s=%.2f\n",
-            candidate_route_safety.conflict.participant_id,
-            candidate_route_safety.conflict.time_to_conflict,
-            candidate_route_safety.conflict.object_s_min );
-          std::fflush( stderr );
-        }
         continue;
       }
-
-      std::fprintf(
-        stderr,
-        "[OA][candidate][final_safety] safe=true shift=%.2f obstacle_margin=%.2f lane_margin=%.2f\n",
-        candidate.shift_candidate.shift,
-        candidate.validation.min_obstacle_lateral_margin,
-        candidate.validation.min_lane_margin );
-      std::fflush( stderr );
 
       if( candidate.uses_opposite_lane )
       {
@@ -5101,20 +4469,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
         reason += ": " + last_oncoming_rejection;
       }
 
-      std::fprintf(
-        stderr,
-        "[OA][candidates] no accepted candidate: waiting for oncoming, evaluated=%zu "
-        "drivable_rej=%zu projection_rej=%zu planning_rej=%zu validation_rej=%zu safety_rej=%zu oncoming_rej=%zu reason=%s\n",
-        evaluated_candidate_count,
-        drivable_area_rejections,
-        projection_rejections,
-        planning_rejections,
-        validation_rejections,
-        safety_rejections,
-        oncoming_rejections,
-        reason.c_str() );
-      std::fflush( stderr );
-
       return plan_stop_before_obstacle(
         ObstacleAvoidanceMode::WaitForOncoming,
         reason );
@@ -5147,24 +4501,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     {
       reason += ": " + last_oncoming_rejection;
     }
-
-    std::fprintf(
-      stderr,
-      "[OA][candidates] no accepted candidate: evaluated=%zu drivable_ok=%s planned_ok=%s validated_ok=%s "
-      "oncoming_seen=%s drivable_rej=%zu projection_rej=%zu planning_rej=%zu validation_rej=%zu safety_rej=%zu oncoming_rej=%zu reason=%s\n",
-      evaluated_candidate_count,
-      saw_drivable_valid_candidate ? "true" : "false",
-      saw_planned_candidate ? "true" : "false",
-      saw_validated_candidate ? "true" : "false",
-      saw_oncoming_conflict ? "true" : "false",
-      drivable_area_rejections,
-      projection_rejections,
-      planning_rejections,
-      validation_rejections,
-      safety_rejections,
-      oncoming_rejections,
-      reason.c_str() );
-    std::fflush( stderr );
 
     return plan_stop_before_obstacle(
       ObstacleAvoidanceMode::StopBeforeObstacle,
@@ -5250,14 +4586,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       &result.trajectory,
       &ignored_participant_ids );
 
-  std::fprintf(
-    stderr,
-    "[OA][candidate][final_safety] safe=%s selected_shift=%.2f reason=%s\n",
-    ( final_route_safety.safe && !final_route_safety.has_conflict ) ? "true" : "false",
-    result.lateral_shift,
-    final_route_safety.reason.c_str() );
-  std::fflush( stderr );
-
   const bool ignore_final_other_lane_oncoming =
     selected.shift_candidate.type == AvoidanceCandidateType::InLane &&
     final_route_safety.has_conflict &&
@@ -5265,15 +4593,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       final_route_safety.conflict,
       vehicle_params,
       selected.params );
-
-  if( ignore_final_other_lane_oncoming )
-  {
-    std::fprintf(
-      stderr,
-      "[OA][candidate][final_safety] ignore selected in-lane oncoming other-lane conflict id=%d actual_clearance>=side_clearance\n",
-      final_route_safety.conflict.participant_id );
-    std::fflush( stderr );
-  }
 
   if( ( final_route_safety.has_conflict || !final_route_safety.safe ) &&
       !ignore_final_other_lane_oncoming )
@@ -5303,25 +4622,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
         "driving mission (waiting before obstacle: oncoming traffic conflict)" );
     }
   }
-
-  std::fprintf(
-    stderr,
-    "[OA] selected validated candidate obstacle_ids=%s cluster_s=[%.2f,%.2f] type=%s shift=%.2f mode=%d in_lane=%s opposite=%s score=%.2f lane_margin=%.2f obstacle_margin=%.2f front_clearance=%.2f rear_clearance=%.2f candidates=%zu\n",
-    ids_to_string( obstacle_group->envelope.participant_ids ).c_str(),
-    obstacle_group->envelope.object_s_min,
-    obstacle_group->envelope.object_s_max,
-    avoidance_candidate_type_name( selected.shift_candidate.type ),
-    result.lateral_shift,
-    static_cast<int>( result.mode ),
-    result.in_lane ? "true" : "false",
-    selected.uses_opposite_lane ? "true" : "false",
-    selected.score,
-    final_validation.min_lane_margin,
-    final_validation.min_obstacle_lateral_margin,
-    selected.params.front_clearance,
-    selected.params.rear_clearance,
-    accepted_candidates.size() );
-  std::fflush( stderr );
 
   const double modified_route_ego_half_width =
     0.5 * std::max( params.min_vehicle_dimension, vehicle_params.body_width );
@@ -5353,24 +4653,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                 ? -modified_route_ego_half_width - modified_footprint->l_max
                 : 0.0 );
 
-      std::fprintf(
-        stderr,
-        "[OA][candidate][clearance] id=%d original_s=[%.2f,%.2f] original_l=[%.2f,%.2f] modified_s=[%.2f,%.2f] modified_l=[%.2f,%.2f] ego_l=[%.2f,%.2f] required_side_clearance=%.2f actual_clearance=%.2f selected_shift=%.2f\n",
-        id,
-        original_footprint->s_min,
-        original_footprint->s_max,
-        original_footprint->l_min,
-        original_footprint->l_max,
-        modified_footprint->s_min,
-        modified_footprint->s_max,
-        modified_footprint->l_min,
-        modified_footprint->l_max,
-        -modified_route_ego_half_width,
-        modified_route_ego_half_width,
-        selected.params.side_clearance,
-        actual_clearance_to_modified_ego,
-        result.lateral_shift );
-      std::fflush( stderr );
     }
   }
 
@@ -5446,21 +4728,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           ? result.maneuver.opposite_lane_conflict_start_s
           : result.plateau_start_s;
 
-      std::fprintf(
-        stderr,
-        "[OA][route_diff] first_diff_s=%.2f last_diff_s=%.2f equal_again_s=%.2f has_equal_after=%s\n",
-        route_diff_bounds->first_different_s,
-        route_diff_bounds->last_different_s,
-        route_equal_again_s,
-        route_diff_bounds->has_equal_point_after_last_difference ? "true" : "false" );
-      std::fflush( stderr );
-    }
-    else
-    {
-      std::fprintf(
-        stderr,
-        "[OA][route_diff] warning: modified route has no detectable difference to original route\n" );
-      std::fflush( stderr );
     }
 
 
@@ -5513,10 +4780,6 @@ try_plan_ego_lane_oncoming_stop( TrajectoryPlanner& planner,
   const bool previous_fallback_allowed =
     planner.get_allow_previous_trajectory_fallback();
   planner.set_allow_previous_trajectory_fallback( false );
-  std::fprintf(
-    stderr,
-    "[OA][STOP_ROUTE] previous trajectory fallback disabled for OA stop\n" );
-  std::fflush( stderr );
   try
   {
     result.trajectory = planner.plan_route_trajectory(
@@ -5622,11 +4885,6 @@ check_route_corridor_safety(
 
     if( ignored_active_obstacle )
     {
-      std::fprintf(
-        stderr,
-        "[OA][MONITOR] ignoring active avoidance obstacle id=%d as expected obstacle\n",
-        participant_id );
-      std::fflush( stderr );
       continue;
     }
 
@@ -6208,10 +5466,6 @@ plan_stop_on_route_before_corridor_conflict(
   const bool previous_fallback_allowed =
     planner.get_allow_previous_trajectory_fallback();
   planner.set_allow_previous_trajectory_fallback( false );
-  std::fprintf(
-    stderr,
-    "[OA][STOP_ROUTE] previous trajectory fallback disabled for OA stop\n" );
-  std::fflush( stderr );
   try
   {
     result.trajectory =
@@ -6296,22 +5550,6 @@ plan_stop_on_route_before_corridor_conflict(
         conflict.participant_id );
       std::fflush( stderr );
     }
-    else
-    {
-      std::fprintf(
-        stderr,
-        "[OA][STOP_ROUTE] maximum route-based braking trajectory accepted id=%d\n",
-        conflict.participant_id );
-      std::fflush( stderr );
-    }
-  }
-  else
-  {
-    std::fprintf(
-      stderr,
-      "[OA][stop] planner trajectory accepted: validated stop before conflict id=%d\n",
-      conflict.participant_id );
-    std::fflush( stderr );
   }
 
   result.trajectory.label =
@@ -6421,11 +5659,6 @@ monitor_active_obstacle_avoidance_maneuver(
 
     if( expected_active_obstacle )
     {
-      std::fprintf(
-        stderr,
-        "[OA][MONITOR] ignoring active avoidance obstacle id=%d as expected obstacle\n",
-        participant_id );
-      std::fflush( stderr );
       continue;
     }
 

@@ -34,51 +34,6 @@ struct RouteFrame
   double yaw = 0.0;
 };
 
-template<typename State>
-double
-project_s_on_reference_line(
-  const map::Route& route,
-  const State& state,
-  double hint_s = std::numeric_limits<double>::quiet_NaN(),
-  double search_window = std::numeric_limits<double>::infinity(),
-  double max_projection_distance = std::numeric_limits<double>::infinity() )
-{
-  if( route.reference_line.size() < 2 )
-  {
-    return std::numeric_limits<double>::infinity();
-  }
-
-  const double first_s = route.reference_line.begin()->first;
-  const double last_s = route.reference_line.rbegin()->first;
-  const double route_window =
-    std::max( ObstacleAvoidanceParams{}.route_window_min, last_s - first_s );
-  const double coarse_s =
-    std::isfinite( hint_s )
-      ? hint_s
-      : 0.5 * ( first_s + last_s );
-  const double window =
-    std::isfinite( search_window )
-      ? search_window
-      : route_window;
-
-  static bool logged_segment_projection = false;
-  if( !logged_segment_projection )
-  {
-    std::fprintf(
-      stderr,
-      "[OA][S_PROJECTION] using reference-line segment projection for modified route\n" );
-    std::fflush( stderr );
-    logged_segment_projection = true;
-  }
-
-  return adore::map::get_s_on_reference_line_segments(
-    route,
-    state,
-    coarse_s,
-    window,
-    max_projection_distance );
-}
-
 struct ObstacleEnvelope
 {
   int id = -1;
@@ -271,40 +226,6 @@ bool
 contains_participant_id( const std::vector<int>& ids, int id )
 {
   return std::find( ids.begin(), ids.end(), id ) != ids.end();
-}
-
-double
-actual_lateral_clearance_to_centered_ego(
-  double object_l_min,
-  double object_l_max,
-  double ego_half_width )
-{
-  const double left_clearance = -ego_half_width - object_l_max;
-  const double right_clearance = object_l_min - ego_half_width;
-  return std::max( left_clearance, right_clearance );
-}
-
-bool
-is_oncoming_other_lane_conflict(
-  const RouteCorridorConflict& conflict,
-  const dynamics::PhysicalVehicleParameters& ego_params,
-  const ObstacleAvoidanceParams& params )
-{
-  if( conflict.object_class != RouteCorridorObjectClass::Oncoming ||
-      conflict.currently_overlaps_ego_footprint )
-  {
-    return false;
-  }
-
-  const double ego_half_width =
-    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width ); // min_vehicle_dimension from params
-  const double actual_clearance =
-    actual_lateral_clearance_to_centered_ego(
-      conflict.object_l_min,
-      conflict.object_l_max,
-      ego_half_width );
-
-  return actual_clearance >= std::max( 0.0, params.side_clearance );
 }
 
 double
@@ -790,6 +711,81 @@ build_stop_route_before_obstacle(
     params );
 }
 
+struct RouteProjectionSample
+{
+  double s = std::numeric_limits<double>::quiet_NaN();
+  double l = std::numeric_limits<double>::quiet_NaN();
+  double distance = std::numeric_limits<double>::infinity();
+};
+
+// Project a world point onto the route reference line. Returns arc-length s,
+// signed lateral offset l (+left of the tangent) and the orthogonal distance of
+// the nearest polyline segment. Returns nullopt if the route has fewer than two
+// points or no finite projection exists.
+std::optional<RouteProjectionSample>
+project_point_to_route_segments( const map::Route& route, double x, double y )
+{
+  if( route.reference_line.size() < 2 )
+  {
+    return std::nullopt;
+  }
+
+  RouteProjectionSample best;
+
+  auto it_prev = route.reference_line.begin();
+  auto it      = std::next( it_prev );
+
+  for( ; it != route.reference_line.end(); ++it, ++it_prev )
+  {
+    const double s0 = it_prev->first;
+    const double s1 = it->first;
+
+    const auto& p0 = it_prev->second;
+    const auto& p1 = it->second;
+
+    const double dx = p1.x - p0.x;
+    const double dy = p1.y - p0.y;
+
+    const double len2 = dx * dx + dy * dy;
+    if( len2 < 1e-9 )
+    {
+      continue;
+    }
+
+    const double t_raw =
+      ( ( x - p0.x ) * dx + ( y - p0.y ) * dy ) / len2;
+
+    const double t = std::clamp( t_raw, 0.0, 1.0 );
+
+    const double px = p0.x + t * dx;
+    const double py = p0.y + t * dy;
+
+    const double ex = x - px;
+    const double ey = y - py;
+
+    const double distance2 = ex * ex + ey * ey;
+
+    if( distance2 < best.distance * best.distance )
+    {
+      const double len = std::sqrt( len2 );
+
+      const double nx = -dy / len;
+      const double ny =  dx / len;
+
+      best.s = s0 + t * ( s1 - s0 );
+      best.l = ex * nx + ey * ny;
+      best.distance = std::sqrt( distance2 );
+    }
+  }
+
+  if( !std::isfinite( best.s ) || !std::isfinite( best.l ) )
+  {
+    return std::nullopt;
+  }
+
+  return best;
+}
+
 bool
 project_obstacle_to_route_analytic( const map::Route& route,
                                     const dynamics::TrafficParticipant& participant,
@@ -814,72 +810,6 @@ project_obstacle_to_route_analytic( const map::Route& route,
   envelope.l_max = -std::numeric_limits<double>::infinity();
 
   envelope.object_count = 1;
-
-  struct Projection
-  {
-    double s = std::numeric_limits<double>::quiet_NaN();
-    double l = std::numeric_limits<double>::quiet_NaN();
-    double distance = std::numeric_limits<double>::infinity();
-  };
-
-  auto project_xy_to_route =
-    [&]( double x, double y ) -> std::optional<Projection>
-    {
-      Projection best;
-
-      auto it_prev = route.reference_line.begin();
-      auto it      = std::next( it_prev );
-
-      for( ; it != route.reference_line.end(); ++it, ++it_prev )
-      {
-        const double s0 = it_prev->first;
-        const double s1 = it->first;
-
-        const auto& p0 = it_prev->second;
-        const auto& p1 = it->second;
-
-        const double dx = p1.x - p0.x;
-        const double dy = p1.y - p0.y;
-
-        const double len2 = dx * dx + dy * dy;
-        if( len2 < 1e-9 )
-        {
-          continue;
-        }
-
-        const double t_raw =
-          ( ( x - p0.x ) * dx + ( y - p0.y ) * dy ) / len2;
-
-        const double t = std::max( 0.0, std::min( 1.0, t_raw ) );
-
-        const double px = p0.x + t * dx;
-        const double py = p0.y + t * dy;
-
-        const double ex = x - px;
-        const double ey = y - py;
-
-        const double distance2 = ex * ex + ey * ey;
-
-        if( distance2 < best.distance * best.distance )
-        {
-          const double len = std::sqrt( len2 );
-
-          const double nx = -dy / len;
-          const double ny =  dx / len;
-
-          best.s = s0 + t * ( s1 - s0 );
-          best.l = ex * nx + ey * ny;
-          best.distance = std::sqrt( distance2 );
-        }
-      }
-
-      if( !std::isfinite( best.s ) || !std::isfinite( best.l ) )
-      {
-        return std::nullopt;
-      }
-
-      return best;
-    };
 
   const double center_x = participant.state.x;
   const double center_y = participant.state.y;
@@ -917,7 +847,7 @@ project_obstacle_to_route_analytic( const map::Route& route,
     const double corner_y =
       center_y + local_x * sin_yaw + local_y * cos_yaw;
 
-    const auto projection = project_xy_to_route( corner_x, corner_y );
+    const auto projection = project_point_to_route_segments( route, corner_x, corner_y );
 
     if( !projection.has_value() )
     {
@@ -1553,71 +1483,6 @@ project_participant_footprint_to_route(
     return std::nullopt;
   }
 
-  struct Projection
-  {
-    double s = std::numeric_limits<double>::quiet_NaN();
-    double l = std::numeric_limits<double>::quiet_NaN();
-    double distance = std::numeric_limits<double>::infinity();
-  };
-
-  auto project_xy_to_route =
-    [&]( double x, double y ) -> std::optional<Projection>
-    {
-      Projection best;
-
-      auto it_prev = route.reference_line.begin();
-      auto it      = std::next( it_prev );
-
-      for( ; it != route.reference_line.end(); ++it, ++it_prev )
-      {
-        const double s0 = it_prev->first;
-        const double s1 = it->first;
-
-        const auto& p0 = it_prev->second;
-        const auto& p1 = it->second;
-
-        const double dx = p1.x - p0.x;
-        const double dy = p1.y - p0.y;
-
-        const double len2 = dx * dx + dy * dy;
-        if( len2 < 1e-9 )
-        {
-          continue;
-        }
-
-        const double t_raw =
-          ( ( x - p0.x ) * dx + ( y - p0.y ) * dy ) / len2;
-
-        const double t = std::clamp( t_raw, 0.0, 1.0 );
-
-        const double px = p0.x + t * dx;
-        const double py = p0.y + t * dy;
-
-        const double ex = x - px;
-        const double ey = y - py;
-
-        const double distance2 = ex * ex + ey * ey;
-
-        if( distance2 < best.distance * best.distance )
-        {
-          const double len = std::sqrt( len2 );
-          const double nx = -dy / len;
-          const double ny =  dx / len;
-
-          best.s = s0 + t * ( s1 - s0 );
-          best.l = ex * nx + ey * ny;
-          best.distance = std::sqrt( distance2 );
-        }
-      }
-
-      if( !std::isfinite( best.s ) || !std::isfinite( best.l ) )
-      {
-        return std::nullopt;
-      }
-
-      return best;
-    };
-
   const double center_x = participant.state.x;
   const double center_y = participant.state.y;
   const double yaw      = participant.state.yaw_angle;
@@ -1652,7 +1517,7 @@ project_participant_footprint_to_route(
     const double corner_y =
       center_y + local_x * sin_yaw + local_y * cos_yaw;
 
-    const auto projection = project_xy_to_route( corner_x, corner_y );
+    const auto projection = project_point_to_route_segments( route, corner_x, corner_y );
     if( !projection.has_value() )
     {
       continue;
@@ -1666,7 +1531,7 @@ project_participant_footprint_to_route(
     footprint.l_max = std::max( footprint.l_max, projection->l );
   }
 
-  const auto center_projection = project_xy_to_route( center_x, center_y );
+  const auto center_projection = project_point_to_route_segments( route, center_x, center_y );
   if( center_projection.has_value() )
   {
     footprint.center_s = center_projection->s;

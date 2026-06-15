@@ -11,6 +11,8 @@
 #include "dynamics/trajectory.hpp"
 #include "planning/trajectory_planner.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <string>
@@ -566,6 +568,82 @@ struct ObstacleAvoidanceResult
 
   ObstacleAvoidanceManeuver maneuver;
 };
+
+// ----------------------------------------------------------------------------
+// Shared helpers used by both the planner library and the decision-maker node.
+// Kept here (instead of duplicated in each translation unit) so the projection
+// and oncoming-clearance logic stays single-sourced.
+// ----------------------------------------------------------------------------
+
+// Project an ego/participant state onto the (possibly laterally modified) route
+// reference line via segment projection. hint_s seeds the coarse search; the
+// search window defaults to the full route span and the projection distance is
+// unbounded by default.
+template<typename State>
+double
+project_s_on_reference_line(
+  const map::Route& route,
+  const State& state,
+  double hint_s = std::numeric_limits<double>::quiet_NaN(),
+  double search_window = std::numeric_limits<double>::infinity(),
+  double max_projection_distance = std::numeric_limits<double>::infinity() )
+{
+  if( route.reference_line.size() < 2 )
+  {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  const double first_s = route.reference_line.begin()->first;
+  const double last_s = route.reference_line.rbegin()->first;
+  const double route_window =
+    std::max( ObstacleAvoidanceParams{}.route_window_min, last_s - first_s );
+  const double coarse_s =
+    std::isfinite( hint_s ) ? hint_s : 0.5 * ( first_s + last_s );
+  const double window =
+    std::isfinite( search_window ) ? search_window : route_window;
+
+  return adore::map::get_s_on_reference_line_segments(
+    route, state, coarse_s, window, max_projection_distance );
+}
+
+// Lateral clearance between a route-centered ego footprint of half-width
+// ego_half_width and an object whose route-frame lateral extent is
+// [object_l_min, object_l_max]. +l is left of the route tangent.
+inline double
+actual_lateral_clearance_to_centered_ego(
+  double object_l_min,
+  double object_l_max,
+  double ego_half_width )
+{
+  const double left_clearance = -ego_half_width - object_l_max;
+  const double right_clearance = object_l_min - ego_half_width;
+  return std::max( left_clearance, right_clearance );
+}
+
+// True if an oncoming object in the other lane keeps at least side_clearance to a
+// route-centered ego footprint, i.e. it does not actually obstruct the ego lane.
+inline bool
+is_oncoming_other_lane_conflict(
+  const RouteCorridorConflict& conflict,
+  const dynamics::PhysicalVehicleParameters& ego_params,
+  const ObstacleAvoidanceParams& params )
+{
+  if( conflict.object_class != RouteCorridorObjectClass::Oncoming ||
+      conflict.currently_overlaps_ego_footprint )
+  {
+    return false;
+  }
+
+  const double ego_half_width =
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
+  const double actual_clearance =
+    actual_lateral_clearance_to_centered_ego(
+      conflict.object_l_min,
+      conflict.object_l_max,
+      ego_half_width );
+
+  return actual_clearance >= std::max( 0.0, params.side_clearance );
+}
 
 /**
  * Obstacle avoidance for the current eclipse-adore/bugfix/revert_to_make API.

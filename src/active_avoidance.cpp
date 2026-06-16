@@ -10,7 +10,6 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
-#include <cstdio>
 #include <limits>
 #include <optional>
 #include <string>

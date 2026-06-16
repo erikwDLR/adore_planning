@@ -264,9 +264,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
         std::max( 0.0, params.min_valid_stop_margin ),
         params );
 
-    const bool previous_fallback_allowed =
-      planner.get_allow_previous_trajectory_fallback();
-    planner.set_allow_previous_trajectory_fallback( false );
     try
     {
       stop_result.trajectory = planner.plan_route_trajectory(
@@ -282,7 +279,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
         e.what() );
       std::fflush( stderr );
     }
-    planner.set_allow_previous_trajectory_fallback( previous_fallback_allowed );
 
     // Validate that the planned trajectory actually stops before the obstacle;
     // a non-empty trajectory alone does not guarantee a stop.
@@ -311,7 +307,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
         stop_result.modified_route,
         project_s_on_reference_line( route, ego, stop_s ) );
 
-      planner.set_allow_previous_trajectory_fallback( false );
       try
       {
         stop_result.trajectory = planner.plan_route_trajectory(
@@ -327,7 +322,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           e.what() );
         std::fflush( stderr );
       }
-      planner.set_allow_previous_trajectory_fallback( previous_fallback_allowed );
 
       if( stop_result.trajectory.states.empty() ||
           !trajectory_stops_before_conflict(
@@ -553,7 +547,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       }
 
       auto candidate_planner = planner;
-      candidate_planner.set_allow_previous_trajectory_fallback( false );
       try
       {
         candidate.trajectory =
@@ -989,9 +982,6 @@ try_plan_ego_lane_oncoming_stop( TrajectoryPlanner& planner,
     std::max( 0.0, params.min_valid_stop_margin ),
     params );
 
-  const bool previous_fallback_allowed =
-    planner.get_allow_previous_trajectory_fallback();
-  planner.set_allow_previous_trajectory_fallback( false );
   try
   {
     result.trajectory = planner.plan_route_trajectory(
@@ -1007,7 +997,6 @@ try_plan_ego_lane_oncoming_stop( TrajectoryPlanner& planner,
       e.what() );
     std::fflush( stderr );
   }
-  planner.set_allow_previous_trajectory_fallback( previous_fallback_allowed );
 
   if( result.trajectory.states.empty() )
   {
@@ -1675,9 +1664,6 @@ plan_stop_on_route_before_corridor_conflict(
       std::max( 0.0, params.min_valid_stop_margin ),
       params );
 
-  const bool previous_fallback_allowed =
-    planner.get_allow_previous_trajectory_fallback();
-  planner.set_allow_previous_trajectory_fallback( false );
   try
   {
     result.trajectory =
@@ -1694,7 +1680,6 @@ plan_stop_on_route_before_corridor_conflict(
       e.what() );
     std::fflush( stderr );
   }
-  planner.set_allow_previous_trajectory_fallback( previous_fallback_allowed );
 
   if( result.trajectory.states.empty() ||
       !trajectory_stops_before_conflict(
@@ -1726,7 +1711,6 @@ plan_stop_on_route_before_corridor_conflict(
     result.modified_route = active_route;
     set_route_points_from_s_to_zero( result.modified_route, ego_s );
 
-    planner.set_allow_previous_trajectory_fallback( false );
     try
     {
       result.trajectory =
@@ -1743,7 +1727,6 @@ plan_stop_on_route_before_corridor_conflict(
         e.what() );
       std::fflush( stderr );
     }
-    planner.set_allow_previous_trajectory_fallback( previous_fallback_allowed );
 
     if( result.trajectory.states.empty() ||
         !trajectory_stops_before_conflict(

@@ -72,6 +72,18 @@ find_unpassed_original_ghost(
   const ActiveAvoidanceState& state,
   double ego_s );
 
+// Monotonic-progression plausibility for the ego projection onto the active
+// modified route. Enforces no-backward motion and rejects implausible forward
+// jumps (projection artifacts, e.g. matches at the search-window edge) by
+// advancing via odometry instead of latching the jump. Updates the state's
+// last_modified_s / last_modified_time. Returns nullopt if the result is not
+// finite (projection lost with no prior value).
+std::optional<double>
+compute_monotonic_ego_s_modified(
+  double ego_s_modified_raw,
+  const dynamics::VehicleStateDynamic& vehicle_state_dynamic,
+  ActiveAvoidanceState& state );
+
 // ----------------------------------------------------------------------------
 // Conflict assessment and stop geometry for a route ego is following.
 // ----------------------------------------------------------------------------

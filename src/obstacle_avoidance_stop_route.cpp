@@ -88,27 +88,9 @@ make_hard_stop_trajectory( const dynamics::VehicleStateDynamic& ego,
   return trajectory;
 }
 
-void
-set_route_points_from_s_to_zero( map::Route& route, double ego_s )
-{
-  if( route.reference_line.empty() )
-  {
-    return;
-  }
-
-  if( !std::isfinite( ego_s ) )
-  {
-    ego_s = route.reference_line.begin()->first;
-  }
-
-  for( auto& [s, point] : route.reference_line )
-  {
-    if( s >= ego_s )
-    {
-      point.max_speed = 0.0;
-    }
-  }
-}
+// set_route_points_from_s_to_zero moved to the public API (defined in
+// obstacle_avoidance.cpp, declared in planning/obstacle_avoidance.hpp). Callers
+// here resolve it via the enclosing planner namespace.
 
 void
 insert_zero_speed_stop_point( map::Route& route, double stop_s )

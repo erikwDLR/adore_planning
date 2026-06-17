@@ -34,6 +34,28 @@ namespace planner
 // unqualified.
 using namespace oa_detail;
 
+void
+set_route_points_from_s_to_zero( map::Route& route, double ego_s )
+{
+  if( route.reference_line.empty() )
+  {
+    return;
+  }
+
+  if( !std::isfinite( ego_s ) )
+  {
+    ego_s = route.reference_line.begin()->first;
+  }
+
+  for( auto& [s, point] : route.reference_line )
+  {
+    if( s >= ego_s )
+    {
+      point.max_speed = 0.0;
+    }
+  }
+}
+
 map::Route
 RouteSpeedPolicy::apply_avoidance_speed_profile(
   const map::Route& route,

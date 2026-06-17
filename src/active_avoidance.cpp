@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <limits>
 #include <optional>
 #include <string>
@@ -22,6 +23,11 @@ namespace planner
 {
 namespace
 {
+
+// Tolerance added on top of the odometry-based advance when judging whether a
+// new projection onto the active modified route is plausible. Covers projection
+// refinement noise between cycles.
+constexpr double MAX_PLAUSIBLE_MODIFIED_S_JUMP = 2.0;
 
 // extra_l_margin widens the lateral match band. Ghost envelopes can stem from
 // projections onto different reference lines (original vs. laterally shifted
@@ -482,10 +488,11 @@ static_or_slow_conflict_has_side_clearance(
 
     const double ego_half_width =
         0.5 * std::max( params.min_vehicle_dimension, vehicle_params.body_width );
-    const double left_clearance = -ego_half_width - conflict.object_l_max;
-    const double right_clearance = conflict.object_l_min - ego_half_width;
     const double actual_clearance =
-        std::max( left_clearance, right_clearance );
+        actual_lateral_clearance_to_centered_ego(
+            conflict.object_l_min,
+            conflict.object_l_max,
+            ego_half_width );
     const double required_clearance = std::max( 0.0, params.side_clearance );
 
     return actual_clearance + 0.02 >= required_clearance;
@@ -589,6 +596,74 @@ should_stop_for_active_conflict(
     }
 
     return false;
+}
+
+std::optional<double>
+compute_monotonic_ego_s_modified(
+    double ego_s_modified_raw,
+    const dynamics::VehicleStateDynamic& vehicle_state_dynamic,
+    ActiveAvoidanceState& state )
+{
+    double ego_s_modified = ego_s_modified_raw;
+
+    if( std::isfinite( ego_s_modified_raw ) &&
+        std::isfinite( state.last_modified_s ) )
+    {
+        // Enforce monotonic progression: never go backward. Forward
+        // jumps beyond what the vehicle can have travelled since the
+        // last cycle are projection artifacts (e.g. matches at the
+        // search-window edge); advance by odometry instead of
+        // latching the jump permanently.
+        const double dt =
+            std::isfinite( state.last_modified_time )
+                ? std::max(
+                      0.0,
+                      vehicle_state_dynamic.time - state.last_modified_time )
+                : 0.0;
+        const double odometry_advance =
+            std::max( 0.0, vehicle_state_dynamic.vx ) * dt;
+        const double max_plausible_advance =
+            odometry_advance + MAX_PLAUSIBLE_MODIFIED_S_JUMP;
+
+        if( ego_s_modified_raw < state.last_modified_s )
+        {
+            ego_s_modified = state.last_modified_s;
+        }
+        else if( ego_s_modified_raw - state.last_modified_s >
+                 max_plausible_advance )
+        {
+            ego_s_modified = state.last_modified_s + odometry_advance;
+            std::fprintf(
+                stderr,
+                "[OA][WARN] implausible ego_s_modified jump raw=%.2f last=%.2f "
+                "max_advance=%.2f; using odometry advance to %.2f\n",
+                ego_s_modified_raw,
+                state.last_modified_s,
+                max_plausible_advance,
+                ego_s_modified );
+            std::fflush( stderr );
+        }
+    }
+    else if( !std::isfinite( ego_s_modified_raw ) &&
+             std::isfinite( state.last_modified_s ) )
+    {
+        // Fallback: projection lost, use last valid value
+        ego_s_modified = state.last_modified_s;
+        std::fprintf(
+            stderr,
+            "[OA][WARN] ego_s_modified projection lost; using last_modified_s=%.2f\n",
+            state.last_modified_s );
+        std::fflush( stderr );
+    }
+
+    if( !std::isfinite( ego_s_modified ) )
+    {
+        return std::nullopt;
+    }
+
+    state.last_modified_s = ego_s_modified;
+    state.last_modified_time = vehicle_state_dynamic.time;
+    return ego_s_modified;
 }
 
 } // namespace planner

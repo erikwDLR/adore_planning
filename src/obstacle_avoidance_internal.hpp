@@ -565,8 +565,9 @@ make_hard_stop_trajectory( const dynamics::VehicleStateDynamic& ego,
                            double dt,
                            const ObstacleAvoidanceParams& params );
 
-void
-set_route_points_from_s_to_zero( map::Route& route, double ego_s );
+// set_route_points_from_s_to_zero is now public (declared in
+// planning/obstacle_avoidance.hpp) so the decision maker can reuse it; oa_detail
+// callers resolve it via the enclosing planner namespace.
 
 void
 insert_zero_speed_stop_point( map::Route& route, double stop_s );

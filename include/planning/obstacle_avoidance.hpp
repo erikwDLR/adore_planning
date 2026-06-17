@@ -50,7 +50,7 @@ struct ObstacleAvoidanceParams
 
   // Required lateral distance from the ego outer edge to the real obstacle
   // outer edge. This is the only object clearance requirement.
-  double side_clearance               = 0.5;
+  double side_clearance               = 1.0;
 
   // Longitudinal planning distances for stop/shift timing. These do not
   // inflate stored obstacle geometry.
@@ -315,6 +315,12 @@ public:
     const dynamics::PhysicalVehicleParameters& vehicle_params,
     const ObstacleAvoidanceParams& params );
 };
+
+// Set max_speed to zero for every route point at or beyond ego_s (immediate /
+// maximum-braking stop request on the given route). Shared with the decision
+// maker so the node does not reimplement this route mutation.
+void
+set_route_points_from_s_to_zero( map::Route& route, double ego_s );
 
 
 enum class ObstacleAvoidanceMode

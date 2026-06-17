@@ -255,6 +255,7 @@ find_static_obstacle_group_on_route(
     0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const double ego_corridor_half_width =
     ego_half_width + params.ego_corridor_safety_margin;
+  const double side_clearance = std::max( 0.0, params.side_clearance );
 
   const double search_start_s = ego_s + params.min_obstacle_route_overlap;
   const double search_end_s   = ego_s + params.max_object_ahead;
@@ -268,6 +269,7 @@ find_static_obstacle_group_on_route(
     params.rear_clearance;
 
   std::vector<ObstacleEnvelope> obstacles;
+  bool saw_trigger_obstacle = false;
 
   for( const auto& [id, participant] : traffic_participants.participants )
   {
@@ -311,12 +313,11 @@ find_static_obstacle_group_on_route(
         0.5 * ( env.object_s_min + env.object_s_max ),
         params );
 
+    // Opposite-heading obstacles are only avoidance obstacles when they reach
+    // into the actual ego (trigger) corridor; otherwise they are oncoming /
+    // other-lane traffic handled by the oncoming logic, not the static shift.
+    // Secondary (non-trigger) obstacles are therefore never opposite-heading.
     if( opposite_heading && !env.overlaps_ego_corridor )
-    {
-      continue;
-    }
-
-    if( !env.overlaps_ego_corridor )
     {
       continue;
     }
@@ -332,13 +333,70 @@ find_static_obstacle_group_on_route(
       continue;
     }
 
+    // env.overlaps_ego_corridor marks a trigger obstacle (reaches into the ego
+    // corridor); obstacles only within the wider band are secondary and do not
+    // start a maneuver on their own.
+    saw_trigger_obstacle = saw_trigger_obstacle || env.overlaps_ego_corridor;
+
     obstacles.push_back( env );
   }
 
-  if( obstacles.empty() )
+  if( obstacles.empty() || !saw_trigger_obstacle )
   {
+    // Nothing actually intrudes into the ego corridor: no maneuver. Obstacles
+    // found only in the wider secondary band must never start a maneuver alone.
     return std::nullopt;
   }
+
+  // Size the secondary-inclusion band to the avoidance shift this trigger set
+  // will actually apply. An obstacle matters when the shifted ego corridor
+  // (half-width ego_half_width + side_clearance, centered on the shifted route)
+  // can reach it, i.e. when it lies within
+  //   ego_half_width + side_clearance + (planned lateral shift)
+  // of the original route centerline. Deriving the reach from the trigger
+  // geometry (the same clearance shift candidate generation computes, plus the
+  // candidate exploration steps) keeps this self-tuning: a small in-lane nudge
+  // includes only near obstacles, a large lane-change shift reaches further. A
+  // secondary obstacle is then validated for side clearance and carried as a
+  // known maneuver obstacle, instead of only surfacing on the already-shifted
+  // route and forcing a late stop. It never drives the shift itself (see the
+  // overlaps_ego_corridor guard in make_candidate_from_obstacle_hulls).
+  double max_trigger_shift = 0.0;
+  for( const auto& env : obstacles )
+  {
+    if( !env.overlaps_ego_corridor )
+    {
+      continue;
+    }
+
+    const double shift_to_pass_left =
+      env.object_l_max + side_clearance + ego_half_width;
+    const double shift_to_pass_right =
+      ego_half_width + side_clearance - env.object_l_min;
+    max_trigger_shift =
+      std::max( { max_trigger_shift, shift_to_pass_left, shift_to_pass_right } );
+  }
+  max_trigger_shift +=
+    std::max( 0, params.lateral_candidate_extra_steps ) *
+    std::max( 0.0, params.lateral_candidate_extra_step );
+
+  const double secondary_inclusion_half_width =
+    ego_half_width + side_clearance + max_trigger_shift;
+
+  obstacles.erase(
+    std::remove_if(
+      obstacles.begin(),
+      obstacles.end(),
+      [&]( const ObstacleEnvelope& env )
+      {
+        if( env.overlaps_ego_corridor )
+        {
+          return false; // always keep trigger obstacles
+        }
+        return !( env.object_l_min <= secondary_inclusion_half_width &&
+                  env.object_l_max >= -secondary_inclusion_half_width );
+      } ),
+    obstacles.end() );
 
   std::sort(
     obstacles.begin(),
@@ -354,9 +412,18 @@ find_static_obstacle_group_on_route(
 
   if( !params.clustering_enabled )
   {
-    const auto& nearest = obstacles.front();
+    // Without clustering only the nearest trigger obstacle drives the maneuver;
+    // secondary-band obstacles are not linked in this mode. obstacles is sorted
+    // by s, so the first trigger is the nearest one.
+    for( const auto& obstacle : obstacles )
+    {
+      if( obstacle.overlaps_ego_corridor )
+      {
+        return make_avoidance_group_from_obstacle( obstacle );
+      }
+    }
 
-    return make_avoidance_group_from_obstacle( nearest );
+    return std::nullopt;
   }
 
   auto groups = make_avoidance_groups_from_clusters( obstacles, params );

@@ -54,9 +54,9 @@ struct ObstacleAvoidanceParams
 
   // Longitudinal planning distances for stop/shift timing. These do not
   // inflate stored obstacle geometry.
-  double front_clearance              = 4.0;
-  double rear_clearance               = 4.0;
-  double stop_before_obstacle         = 7.0;
+  double front_clearance              = 7.0;
+  double rear_clearance               = 7.0;
+  double stop_before_obstacle         = 8.0;
 
   // Allow lateral shifts within the current lane (without changing lanes).
   bool in_lane_shift_enabled = true;

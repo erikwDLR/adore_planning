@@ -32,12 +32,12 @@ normalized_stop_before_obstacle( const ObstacleAvoidanceParams& params )
   }
 
   const double adjusted = params.front_clearance + params.stop_adjustment_offset;
-  std::fprintf(
-    stderr,
-    "[OA][CONFIG] stop_before_obstacle must be greater than front_clearance; adjusted from %.2f to %.2f\n",
-    params.stop_before_obstacle,
-    adjusted );
-  std::fflush( stderr );
+  // std::fprintf(
+    // stderr,
+    // "[OA][CONFIG] stop_before_obstacle must be greater than front_clearance; adjusted from %.2f to %.2f\n",
+    // params.stop_before_obstacle,
+    // adjusted );
+  // std::fflush( stderr );
   return adjusted;
 }
 
@@ -82,10 +82,10 @@ build_stop_route_before_obstacle(
 
   if( !std::isfinite( ego_s ) )
   {
-    std::fprintf(
-      stderr,
-      "[OA] stop route: invalid ego_s\n" );
-    std::fflush( stderr );
+    // std::fprintf(
+      // stderr,
+      // "[OA] stop route: invalid ego_s\n" );
+    // std::fflush( stderr );
 
     return stop_route;
   }
@@ -101,13 +101,13 @@ build_stop_route_before_obstacle(
 
   if( !std::isfinite( stop_s ) )
   {
-    std::fprintf(
-      stderr,
-      "[OA] stop route: invalid reference stop_s, object_s_min=%.2f stop_distance=%.2f front_offset=%.2f\n",
-      obstacle.object_s_min,
-      stop_before_obstacle,
-      vehicle_params.wheelbase + vehicle_params.front_axle_to_front_border );
-    std::fflush( stderr );
+    // std::fprintf(
+      // stderr,
+      // "[OA] stop route: invalid reference stop_s, object_s_min=%.2f stop_distance=%.2f front_offset=%.2f\n",
+      // obstacle.object_s_min,
+      // stop_before_obstacle,
+      // vehicle_params.wheelbase + vehicle_params.front_axle_to_front_border );
+    // std::fflush( stderr );
 
     return stop_route;
   }
@@ -143,19 +143,19 @@ build_stop_route_before_obstacle(
   if( available_distance <= 0.0 ||
       available_distance < required_braking_distance + hard_reachability_margin )
   {
-    std::fprintf(
-      stderr,
-      "[OA][STOP_ROUTE] requested stop unreachable; applying maximum route-based braking ego_s=%.2f reference_stop_s=%.2f front_stop_s=%.2f object_s_min=%.2f v=%.2f available=%.2f required=%.2f safety_margin=%.2f reachability_margin=%.2f\n",
-      ego_s,
-      stop_s,
-      front_stop_s,
-      obstacle.object_s_min,
-      current_speed,
-      available_distance,
-      required_braking_distance,
-      reachability_margin,
-      hard_reachability_margin );
-    std::fflush( stderr );
+    // std::fprintf(
+      // stderr,
+      // "[OA][STOP_ROUTE] requested stop unreachable; applying maximum route-based braking ego_s=%.2f reference_stop_s=%.2f front_stop_s=%.2f object_s_min=%.2f v=%.2f available=%.2f required=%.2f safety_margin=%.2f reachability_margin=%.2f\n",
+      // ego_s,
+      // stop_s,
+      // front_stop_s,
+      // obstacle.object_s_min,
+      // current_speed,
+      // available_distance,
+      // required_braking_distance,
+      // reachability_margin,
+      // hard_reachability_margin );
+    // std::fflush( stderr );
     set_route_points_from_s_to_zero( stop_route, ego_s );
 
     return stop_route;

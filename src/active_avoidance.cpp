@@ -633,15 +633,15 @@ compute_monotonic_ego_s_modified(
                  max_plausible_advance )
         {
             ego_s_modified = state.last_modified_s + odometry_advance;
-            std::fprintf(
-                stderr,
-                "[OA][WARN] implausible ego_s_modified jump raw=%.2f last=%.2f "
-                "max_advance=%.2f; using odometry advance to %.2f\n",
-                ego_s_modified_raw,
-                state.last_modified_s,
-                max_plausible_advance,
-                ego_s_modified );
-            std::fflush( stderr );
+            // std::fprintf(
+                // stderr,
+                // "[OA][WARN] implausible ego_s_modified jump raw=%.2f last=%.2f "
+                // "max_advance=%.2f; using odometry advance to %.2f\n",
+                // ego_s_modified_raw,
+                // state.last_modified_s,
+                // max_plausible_advance,
+                // ego_s_modified );
+            // std::fflush( stderr );
         }
     }
     else if( !std::isfinite( ego_s_modified_raw ) &&
@@ -649,11 +649,11 @@ compute_monotonic_ego_s_modified(
     {
         // Fallback: projection lost, use last valid value
         ego_s_modified = state.last_modified_s;
-        std::fprintf(
-            stderr,
-            "[OA][WARN] ego_s_modified projection lost; using last_modified_s=%.2f\n",
-            state.last_modified_s );
-        std::fflush( stderr );
+        // std::fprintf(
+            // stderr,
+            // "[OA][WARN] ego_s_modified projection lost; using last_modified_s=%.2f\n",
+            // state.last_modified_s );
+        // std::fflush( stderr );
     }
 
     if( !std::isfinite( ego_s_modified ) )

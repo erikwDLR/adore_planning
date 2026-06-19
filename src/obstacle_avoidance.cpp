@@ -297,11 +297,12 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     }
     catch( const std::exception& e )
     {
-      std::fprintf(
-        stderr,
-        "[OA][STOP_ROUTE] planner exception on stop route: %s\n",
-        e.what() );
-      std::fflush( stderr );
+      static_cast<void>( e );
+      // std::fprintf(
+        // stderr,
+        // "[OA][STOP_ROUTE] planner exception on stop route: %s\n",
+        // e.what() );
+      // std::fflush( stderr );
     }
 
     // Validate that the planned trajectory actually stops before the obstacle;
@@ -321,10 +322,10 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           vehicle_params,
           params ) )
     {
-      std::fprintf(
-        stderr,
-        "[OA][STOP_ROUTE] invalid stop trajectory; retrying with maximum route-based braking\n" );
-      std::fflush( stderr );
+      // std::fprintf(
+        // stderr,
+        // "[OA][STOP_ROUTE] invalid stop trajectory; retrying with maximum route-based braking\n" );
+      // std::fflush( stderr );
 
       stop_result.modified_route = route;
       set_route_points_from_s_to_zero(
@@ -340,11 +341,12 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       }
       catch( const std::exception& e )
       {
-        std::fprintf(
-          stderr,
-          "[OA][STOP_ROUTE] planner exception on maximum route-based braking: %s\n",
-          e.what() );
-        std::fflush( stderr );
+        static_cast<void>( e );
+        // std::fprintf(
+          // stderr,
+          // "[OA][STOP_ROUTE] planner exception on maximum route-based braking: %s\n",
+          // e.what() );
+        // std::fflush( stderr );
       }
 
       if( stop_result.trajectory.states.empty() ||
@@ -357,10 +359,10 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       {
         stop_result.success = false;
         stop_result.reason = "OA stop route planning failed";
-        std::fprintf(
-          stderr,
-          "[OA][STOP_ROUTE] maximum route-based braking failed or did not stop before conflict; no valid route trajectory\n" );
-        std::fflush( stderr );
+        // std::fprintf(
+          // stderr,
+          // "[OA][STOP_ROUTE] maximum route-based braking failed or did not stop before conflict; no valid route trajectory\n" );
+        // std::fflush( stderr );
         return stop_result;
       }
 
@@ -960,19 +962,20 @@ try_plan_ego_lane_oncoming_stop( TrajectoryPlanner& planner,
   }
   catch( const std::exception& e )
   {
-    std::fprintf(
-      stderr,
-      "[OA][STOP_ROUTE] planner exception; keeping ego-lane stop route without free-space fallback: %s\n",
-      e.what() );
-    std::fflush( stderr );
+    static_cast<void>( e );
+    // std::fprintf(
+      // stderr,
+      // "[OA][STOP_ROUTE] planner exception; keeping ego-lane stop route without free-space fallback: %s\n",
+      // e.what() );
+    // std::fflush( stderr );
   }
 
   if( result.trajectory.states.empty() )
   {
-    std::fprintf(
-      stderr,
-      "[OA][STOP_ROUTE] planner returned empty trajectory; keeping ego-lane stop route without free-space fallback\n" );
-    std::fflush( stderr );
+    // std::fprintf(
+      // stderr,
+      // "[OA][STOP_ROUTE] planner returned empty trajectory; keeping ego-lane stop route without free-space fallback\n" );
+    // std::fflush( stderr );
   }
 
   result.trajectory.label =
@@ -989,11 +992,11 @@ try_plan_ego_lane_oncoming_stop( TrajectoryPlanner& planner,
 
   if( params.debug_oncoming_check )
   {
-    std::fprintf(
-      stderr,
-      "[OA][ego_lane_oncoming] STOP: %s\n",
-      result.reason.c_str() );
-    std::fflush( stderr );
+    // std::fprintf(
+      // stderr,
+      // "[OA][ego_lane_oncoming] STOP: %s\n",
+      // result.reason.c_str() );
+    // std::fflush( stderr );
   }
 
   return result;

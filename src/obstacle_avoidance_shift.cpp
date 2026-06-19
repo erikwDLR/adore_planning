@@ -370,8 +370,6 @@ build_modified_avoidance_route( const map::Route& route,
 
   for( auto& [s, point] : modified_route.reference_line )
   {
-    const auto alpha_sample = avoidance_shift_alpha_at_s( s, group, params );
-    const double alpha = alpha_sample.alpha;
     const double offset =
       avoidance_shift_offset_at_s(
         s,
@@ -391,8 +389,6 @@ build_modified_avoidance_route( const map::Route& route,
 
     point.x = shifted_point_xy.x;
     point.y = shifted_point_xy.y;
-
-    (void)alpha;
   }
 
   const double shift_start_s =

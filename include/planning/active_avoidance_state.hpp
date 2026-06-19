@@ -42,6 +42,11 @@ struct ActiveAvoidanceState
   double shift_end_s = 0.0;
   double release_s = 0.0;
 
+  // Route-s of the nearest avoided obstacle's leading edge. The lateral shift
+  // reaches its maximum here (ramp-up ends, plateau begins), so it is used as
+  // the turn-indicator cutoff. Infinity until a maneuver populates it.
+  double obstacle_s_min = std::numeric_limits<double>::infinity();
+
   double lateral_shift = 0.0;
   bool in_lane = false;
 
@@ -76,6 +81,7 @@ struct ActiveAvoidanceState
     shift_start_s = 0.0;
     shift_end_s = 0.0;
     release_s = 0.0;
+    obstacle_s_min = std::numeric_limits<double>::infinity();
 
     lateral_shift = 0.0;
     in_lane = false;

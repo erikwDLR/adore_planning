@@ -130,27 +130,6 @@ candidate_respects_drivable_area( const map::Route& route,
 
     if( ego_min_l < allowed_interval->min_l || ego_max_l > allowed_interval->max_l )
     {
-
-      if( !allow_adjacent_driving_lanes )
-      {
-        const auto adjacent_interval =
-          get_allowed_lateral_interval_at_route_point(
-            route,
-            route_point,
-            route_s,
-            lateral_shift,
-            true,
-            params );
-
-        const auto opposite_query =
-          query_opposite_direction_lateral_interval_at_route_point(
-            route,
-            route_point,
-            route_s,
-            lateral_shift > 0.0,
-            params );
-
-      }
       return false;
     }
   }

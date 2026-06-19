@@ -220,7 +220,8 @@ find_static_obstacle_group_on_route(
   const dynamics::VehicleStateDynamic& ego,
   const dynamics::TrafficParticipantSet& traffic_participants,
   const dynamics::PhysicalVehicleParameters& ego_params,
-  const ObstacleAvoidanceParams& params );
+  const ObstacleAvoidanceParams& params,
+  const std::vector<int>* ignored_participant_ids = nullptr );
 
 // ---------------------------------------------------------------------------
 // Lateral-shift profile math + modified-route construction (obstacle_avoidance_shift.cpp)
@@ -555,15 +556,6 @@ score_route_shift_candidate( const RouteShiftPlanCandidate& candidate,
 
 double
 normalized_stop_before_obstacle( const ObstacleAvoidanceParams& params );
-
-dynamics::Trajectory
-make_stop_trajectory( const dynamics::VehicleStateDynamic& ego, double dt );
-
-dynamics::Trajectory
-make_hard_stop_trajectory( const dynamics::VehicleStateDynamic& ego,
-                           const dynamics::PhysicalVehicleParameters& vehicle_params,
-                           double dt,
-                           const ObstacleAvoidanceParams& params );
 
 // set_route_points_from_s_to_zero is now public (declared in
 // planning/obstacle_avoidance.hpp) so the decision maker can reuse it; oa_detail

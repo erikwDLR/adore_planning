@@ -107,11 +107,6 @@ find_ego_lane_oncoming_threat(
       continue;
     }
 
-    if( footprint->s_max < ego_s - params.rear_clearance )
-    {
-      continue;
-    }
-
     const double participant_near_s = footprint->s_min;
     const double distance_s = participant_near_s - ego_s - ego_front_offset;
 

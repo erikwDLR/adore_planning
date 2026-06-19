@@ -229,13 +229,17 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
   ObstacleAvoidanceResult result;
   result.modified_route = route;
 
-  // Find nearest relevant static obstacle group on route.
+  // Find nearest relevant static obstacle group on route. During a dynamic
+  // replan the obstacles already handled by the active maneuver are passed as
+  // ignored so detection locks onto the genuinely new obstacle rather than the
+  // one ego is currently passing.
   const auto obstacle_group = find_static_obstacle_group_on_route(
     route,
     ego,
     traffic_participants,
     planner.get_physical_vehicle_parameters(),
-    params );
+    params,
+    additional_ignored_participant_ids );
 
   if( !obstacle_group.has_value() )
   {
@@ -264,8 +268,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
         : obstacle_group->envelope.participant_ids;
     stop_result.obstacle_s_min = stop_obstacle.object_s_min;
     stop_result.obstacle_s_max = stop_obstacle.object_s_max;
-    const double shift_start_s =
-      std::max( 0.0, stop_obstacle.object_s_min - std::max( 0.0, params.front_clearance ) );
     const double stop_before_obstacle =
       normalized_stop_before_obstacle( params );
     const double ego_front_offset =
@@ -393,16 +395,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
   std::vector<RouteShiftPlanCandidate> accepted_candidates;
 
-  std::size_t evaluated_candidate_count = 0;
-  std::size_t drivable_area_rejections = 0;
-  std::size_t projection_rejections = 0;
-  std::size_t planning_rejections = 0;
-  std::size_t validation_rejections = 0;
-  std::size_t safety_rejections = 0;
-  std::size_t oncoming_rejections = 0;
-
-  bool saw_drivable_valid_candidate = false;
-  bool saw_planned_candidate = false;
   bool saw_validated_candidate = false;
   bool saw_oncoming_conflict = false;
 
@@ -488,7 +480,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       RouteShiftPlanCandidate candidate;
       candidate.shift_candidate = raw_shift;
       candidate.params = params;
-      ++evaluated_candidate_count;
 
       evaluate_shift_candidate(
         candidate.shift_candidate,
@@ -499,15 +490,12 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
       if( !candidate.shift_candidate.valid )
       {
-        ++drivable_area_rejections;
         last_drivable_area_rejection =
           describe_candidate_rejection(
             candidate,
             "candidate rejected by drivable-area check" );
         continue;
       }
-
-      saw_drivable_valid_candidate = true;
 
       candidate.mode =
         candidate.shift_candidate.in_lane
@@ -560,7 +548,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
       if( !std::isfinite( candidate.ego_s_modified ) )
       {
-        ++projection_rejections;
         last_projection_rejection =
           describe_candidate_rejection(
             candidate,
@@ -580,7 +567,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       }
       catch( const std::exception& e )
       {
-        ++planning_rejections;
         last_planning_rejection =
           describe_candidate_rejection(
             candidate,
@@ -590,15 +576,12 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
       if( candidate.trajectory.states.empty() )
       {
-        ++planning_rejections;
         last_planning_rejection =
           describe_candidate_rejection(
             candidate,
             "candidate rejected: planner returned empty trajectory" );
         continue;
       }
-
-      saw_planned_candidate = true;
 
       candidate.validation =
         validate_planned_shift_trajectory(
@@ -614,7 +597,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
       if( !candidate.validation.valid )
       {
-        ++validation_rejections;
         last_validation_rejection =
           describe_candidate_rejection(
             candidate,
@@ -645,7 +627,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       if( ( candidate_route_safety.has_conflict || !candidate_route_safety.safe ) &&
           !ignore_other_lane_oncoming )
       {
-        ++safety_rejections;
         last_safety_rejection =
           describe_candidate_rejection(
             candidate,
@@ -670,7 +651,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
         if( candidate.oncoming.conflict )
         {
-          ++oncoming_rejections;
           saw_oncoming_conflict = true;
           last_oncoming_rejection =
             describe_candidate_rejection(
@@ -847,39 +827,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       return plan_stop_before_obstacle(
         ObstacleAvoidanceMode::WaitForOncoming,
         "driving mission (waiting before obstacle: oncoming traffic conflict)" );
-    }
-  }
-
-  const double modified_route_ego_half_width =
-    0.5 * std::max( params.min_vehicle_dimension, vehicle_params.body_width );
-  for( const int id : obstacle_group->envelope.participant_ids )
-  {
-    const auto participant_it = traffic_participants.participants.find( id );
-    if( participant_it == traffic_participants.participants.end() )
-    {
-      continue;
-    }
-
-    const auto original_footprint =
-      project_participant_footprint_to_route(
-        route,
-        participant_it->second,
-        params );
-    const auto modified_footprint =
-      project_participant_footprint_to_route(
-        result.modified_route,
-        participant_it->second,
-        params );
-
-    if( original_footprint.has_value() && modified_footprint.has_value() )
-    {
-      const double actual_clearance_to_modified_ego =
-        modified_footprint->l_min > modified_route_ego_half_width
-          ? modified_footprint->l_min - modified_route_ego_half_width
-          : ( modified_footprint->l_max < -modified_route_ego_half_width
-                ? -modified_route_ego_half_width - modified_footprint->l_max
-                : 0.0 );
-
     }
   }
 
@@ -1120,15 +1067,6 @@ check_route_corridor_safety(
     }
 
     if( footprint->s_max < check_start_s || footprint->s_min > check_end_s )
-    {
-      continue;
-    }
-
-    const bool longitudinally_relevant =
-      footprint->s_max >= check_start_s &&
-      footprint->s_min <= check_end_s;
-
-    if( !longitudinally_relevant )
     {
       continue;
     }
@@ -1597,183 +1535,6 @@ trajectory_stops_before_conflict(
   return final_before_conflict && final_stopped && stopped_before_conflict;
 }
 
-ObstacleAvoidanceResult
-plan_stop_on_route_before_corridor_conflict(
-  TrajectoryPlanner& planner,
-  const map::Route& active_route,
-  const dynamics::VehicleStateDynamic& ego,
-  const dynamics::TrafficParticipantSet& traffic_participants,
-  const RouteCorridorConflict& conflict,
-  const ObstacleAvoidanceParams& params )
-{
-  ObstacleAvoidanceResult result;
-  result.success = true;
-  result.mode = ObstacleAvoidanceMode::StopBeforeObstacle;
-  result.reason = "driving mission (OA active-route stop fallback)";
-  result.modified_route = active_route;
-  const auto vehicle_params = planner.get_physical_vehicle_parameters();
-
-  ObstacleEnvelope pseudo_obstacle;
-  pseudo_obstacle.id = conflict.participant_id;
-  pseudo_obstacle.object_s_min = conflict.object_s_min;
-  pseudo_obstacle.object_s_max = conflict.object_s_max;
-  pseudo_obstacle.s_min = conflict.inflated_s_min;
-  pseudo_obstacle.s_max = conflict.inflated_s_max;
-  pseudo_obstacle.object_l_min = conflict.object_l_min;
-  pseudo_obstacle.object_l_max = conflict.object_l_max;
-
-  const double ego_s = project_s_on_reference_line( active_route, ego, conflict.object_s_min );
-  const double ego_front_offset =
-    vehicle_params.wheelbase + vehicle_params.front_axle_to_front_border;
-  const double front_stop_s =
-    conflict.object_s_min -
-    std::max( 0.0, normalized_stop_before_obstacle( params ) );
-  const double stop_s =
-    front_stop_s - ego_front_offset;
-  const double deceleration =
-    std::max( params.min_braking_deceleration, std::fabs( vehicle_params.acceleration_min ) );
-  const double required_braking_distance =
-    std::max( 0.0, ego.vx ) * std::max( 0.0, ego.vx ) /
-    ( 2.0 * deceleration );
-  const double available_stop_distance = stop_s - ego_s;
-  const double stop_safety_margin =
-    std::max( 0.0, params.modified_route_braking_safety_margin ) +
-    std::max( 0.0, params.min_valid_stop_margin );
-  const double stop_reachability_margin =
-    std::max( 0.0, ego.vx ) > 0.5
-      ? stop_safety_margin
-      : 0.0;
-  const double required_stop_distance =
-    required_braking_distance +
-    stop_reachability_margin;
-  const bool requested_stop_reachable =
-    std::isfinite( ego_s ) &&
-    std::isfinite( stop_s ) &&
-    stop_s > ego_s &&
-    available_stop_distance >= required_stop_distance;
-
-  if( !std::isfinite( ego_s ) ||
-      !std::isfinite( stop_s ) ||
-      stop_s <= ego_s + std::max( 0.0, params.min_valid_stop_margin ) ||
-      available_stop_distance < required_stop_distance )
-  {
-    std::fprintf(
-      stderr,
-      "[OA][STOP_ROUTE] requested stop unreachable; applying maximum route-based braking reason=%s ego_s=%.2f reference_stop_s=%.2f front_stop_s=%.2f object_s_min=%.2f v=%.2f available=%.2f required=%.2f safety_margin=%.2f reachability_margin=%.2f\n",
-      stop_s <= ego_s + std::max( 0.0, params.min_valid_stop_margin )
-        ? "stop_s_behind_ego"
-        : "stop_s_unreachable",
-      ego_s,
-      stop_s,
-      front_stop_s,
-      conflict.object_s_min,
-      ego.vx,
-      available_stop_distance,
-      required_stop_distance,
-      stop_safety_margin,
-      stop_reachability_margin );
-    std::fflush( stderr );
-  }
-
-  result.modified_route =
-    build_stop_route_before_obstacle(
-      active_route,
-      pseudo_obstacle,
-      ego,
-      vehicle_params,
-      normalized_stop_before_obstacle( params ),
-      std::max( 0.0, params.modified_route_braking_safety_margin ) +
-      std::max( 0.0, params.min_valid_stop_margin ),
-      params );
-
-  try
-  {
-    result.trajectory =
-      planner.plan_route_trajectory(
-        result.modified_route,
-        ego,
-        traffic_participants );
-  }
-  catch( const std::exception& e )
-  {
-    std::fprintf(
-      stderr,
-      "[OA][STOP_ROUTE] planner exception on stop route: %s\n",
-      e.what() );
-    std::fflush( stderr );
-  }
-
-  if( result.trajectory.states.empty() ||
-      !trajectory_stops_before_conflict(
-        result.trajectory,
-        result.modified_route,
-        conflict,
-        vehicle_params,
-        params ) )
-  {
-    std::fprintf(
-      stderr,
-      "[OA][STOP_ROUTE] invalid stop trajectory; retrying with maximum route-based braking id=%d\n",
-      conflict.participant_id );
-    std::fflush( stderr );
-
-    if( requested_stop_reachable )
-    {
-      result.success = false;
-      result.reason =
-        "OA reachable active-route stop profile invalid";
-      std::fprintf(
-        stderr,
-        "[OA][STOP_ROUTE] reachable stop profile invalid; refusing to move stop point to ego id=%d\n",
-        conflict.participant_id );
-      std::fflush( stderr );
-      return result;
-    }
-
-    result.modified_route = active_route;
-    set_route_points_from_s_to_zero( result.modified_route, ego_s );
-
-    try
-    {
-      result.trajectory =
-        planner.plan_route_trajectory(
-          result.modified_route,
-          ego,
-          traffic_participants );
-    }
-    catch( const std::exception& e )
-    {
-      std::fprintf(
-        stderr,
-        "[OA][STOP_ROUTE] planner exception on maximum route-based braking: %s\n",
-        e.what() );
-      std::fflush( stderr );
-    }
-
-    if( result.trajectory.states.empty() ||
-        !trajectory_stops_before_conflict(
-          result.trajectory,
-          result.modified_route,
-          conflict,
-          vehicle_params,
-          params ) )
-    {
-      result.success = false;
-      result.reason =
-        "OA active-route maximum route-based braking failed";
-      std::fprintf(
-        stderr,
-        "[OA][STOP_ROUTE] maximum route-based braking failed or did not stop before conflict id=%d\n",
-        conflict.participant_id );
-      std::fflush( stderr );
-    }
-  }
-
-  result.trajectory.label =
-    "driving mission (OA active-route stop fallback)";
-
-  return result;
-}
 
 ObstacleAvoidanceMonitorResult
 monitor_active_obstacle_avoidance_maneuver(

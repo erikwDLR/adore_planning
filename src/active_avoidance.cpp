@@ -235,7 +235,6 @@ update_obstacle_ghost_memory(
 
         if( match_it != state.ghost_memory.end() )
         {
-            const int old_id = match_it->last_participant_id;
             const double first_seen_time = match_it->first_seen_time;
             const int seen_count = match_it->seen_count + 1;
             const bool original_obstacle =
@@ -310,6 +309,7 @@ start_active_avoidance_state(
     state.shift_start_s = oa_result.shift_start_s;
     state.shift_end_s = oa_result.shift_end_s;
     state.release_s = oa_result.shift_end_s;
+    state.obstacle_s_min = oa_result.obstacle_s_min;
 
     state.lateral_shift = oa_result.lateral_shift;
     state.in_lane = oa_result.in_lane;

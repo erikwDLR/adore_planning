@@ -83,6 +83,15 @@ struct ObstacleAvoidanceParams
   // 0.0 disables speed capping
   double max_speed_during_avoidance    = 2.7; // ~10 km/h
 
+  // Distance ahead of the lateral-shift start (shift_start_s) at which the turn
+  // indicator is switched on for an avoidance maneuver. The indicator is derived
+  // downstream (trajectory_tracker) purely from the trajectory label; until ego
+  // is within this distance of where it actually begins to move over, the
+  // avoidance label carries no direction so the blinker stays off. This keeps
+  // the vehicle from signaling at the (often far-ahead) moment the maneuver is
+  // merely decided. Larger = signal earlier.
+  double blinker_lead_distance         = 10.0;
+
   // Candidate generation.
   bool validate_shifted_trajectory = true;
   int lateral_candidate_extra_steps = 2;
@@ -170,9 +179,6 @@ struct ObstacleAvoidanceParams
 
   // Time horizon for predicting participant trajectories. Limits lookahead.
   double prediction_time_horizon = 15.0;
-
-  // Time step for sampling predicted trajectories (if available).
-  //double prediction_time_step = 0.2;
 
   // Safety distance from ego footprint front to oncoming vehicle rear during conflict.
   double oncoming_safety_distance_front = 10.0;
@@ -674,15 +680,6 @@ check_route_corridor_safety(
   const ObstacleAvoidanceParams& params = {},
   const dynamics::Trajectory* ego_trajectory = nullptr,
   const std::vector<int>* ignored_participant_ids = nullptr );
-
-ObstacleAvoidanceResult
-plan_stop_on_route_before_corridor_conflict(
-  TrajectoryPlanner& planner,
-  const map::Route& active_route,
-  const dynamics::VehicleStateDynamic& ego,
-  const dynamics::TrafficParticipantSet& traffic_participants,
-  const RouteCorridorConflict& conflict,
-  const ObstacleAvoidanceParams& params = {} );
 
 bool
 trajectory_stops_before_conflict(

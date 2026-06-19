@@ -41,53 +41,6 @@ normalized_stop_before_obstacle( const ObstacleAvoidanceParams& params )
   return adjusted;
 }
 
-dynamics::Trajectory
-make_stop_trajectory( const dynamics::VehicleStateDynamic& ego, double dt )
-{
-  dynamics::Trajectory trajectory;
-  trajectory.label = "obstacle avoidance: stop fallback";
-
-  auto stop_state = ego;
-  stop_state.vx = 0.0;
-  stop_state.time = ego.time + dt;
-
-  trajectory.states.push_back( ego );
-  trajectory.states.push_back( stop_state );
-
-  return trajectory;
-}
-
-dynamics::Trajectory
-make_hard_stop_trajectory( const dynamics::VehicleStateDynamic& ego,
-                           const dynamics::PhysicalVehicleParameters& vehicle_params,
-                           double dt,
-                           const ObstacleAvoidanceParams& params )
-{
-  dynamics::Trajectory trajectory;
-  trajectory.label = "obstacle avoidance: immediate hold";
-
-  const double step = std::max( params.trajectory_step_size, dt );
-  const double start_speed = std::max( 0.0, ego.vx );
-  const int samples = 6;
-
-  for( int i = 0; i < samples; ++i )
-  {
-    auto state = ego;
-    state.time = ego.time + i * step;
-    state.vx =
-      i == 0
-        ? ego.vx
-        : start_speed * std::max( 0.0, 1.0 - static_cast<double>( i ) / ( samples - 1 ) );
-    trajectory.states.push_back( state );
-  }
-
-  trajectory.states.back().vx = 0.0;
-
-  (void)vehicle_params;
-
-  return trajectory;
-}
-
 // set_route_points_from_s_to_zero moved to the public API (defined in
 // obstacle_avoidance.cpp, declared in planning/obstacle_avoidance.hpp). Callers
 // here resolve it via the enclosing planner namespace.

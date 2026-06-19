@@ -200,30 +200,12 @@ project_obstacle_to_route_analytic( const map::Route& route,
     return false;
   }
 
-  const double center_s =
-    0.5 * ( envelope.object_s_min + envelope.object_s_max );
-
-  const double center_l =
-    0.5 * ( envelope.object_l_min + envelope.object_l_max );
-
-  const auto center_frame = make_route_frame( route, center_s );
-
-  const double rel_yaw =
-    normalize_angle( participant.state.yaw_angle - center_frame.yaw );
-
   const double corridor_half_width =
     ego_half_width + params.ego_corridor_safety_margin;
 
   const bool overlaps_ego_corridor =
     envelope.object_l_min <= corridor_half_width &&
     envelope.object_l_max >= -corridor_half_width;
-
-  const double distance_to_corridor =
-    envelope.object_l_min > corridor_half_width
-      ? envelope.object_l_min - corridor_half_width
-      : ( envelope.object_l_max < -corridor_half_width
-            ? -corridor_half_width - envelope.object_l_max
-            : 0.0 );
 
   envelope.overlaps_ego_corridor = overlaps_ego_corridor;
 
@@ -234,10 +216,6 @@ project_obstacle_to_route_analytic( const map::Route& route,
 
   envelope.center_s = 0.5 * ( envelope.s_min + envelope.s_max );
   envelope.center_l = 0.5 * ( envelope.l_min + envelope.l_max );
-
-  (void)center_l;
-  (void)rel_yaw;
-  (void)distance_to_corridor;
 
   return true;
 }

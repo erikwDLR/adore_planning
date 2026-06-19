@@ -243,7 +243,8 @@ find_static_obstacle_group_on_route(
   const dynamics::VehicleStateDynamic& ego,
   const dynamics::TrafficParticipantSet& traffic_participants,
   const dynamics::PhysicalVehicleParameters& ego_params,
-  const ObstacleAvoidanceParams& params )
+  const ObstacleAvoidanceParams& params,
+  const std::vector<int>* ignored_participant_ids )
 {
   const double ego_s = project_s_on_reference_line( route, ego );
   if( !std::isfinite( ego_s ) )
@@ -253,8 +254,6 @@ find_static_obstacle_group_on_route(
 
   const double ego_half_width =
     0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
-  const double ego_corridor_half_width =
-    ego_half_width + params.ego_corridor_safety_margin;
   const double side_clearance = std::max( 0.0, params.side_clearance );
 
   const double search_start_s = ego_s + params.min_obstacle_route_overlap;
@@ -273,6 +272,15 @@ find_static_obstacle_group_on_route(
 
   for( const auto& [id, participant] : traffic_participants.participants )
   {
+    // Skip obstacles already handled by an active maneuver (e.g. the one ego is
+    // currently passing): detection must lock onto the genuinely new obstacle,
+    // not re-target a participant the caller is already avoiding.
+    if( ignored_participant_ids != nullptr &&
+        contains_participant_id( *ignored_participant_ids, static_cast<int>( id ) ) )
+    {
+      continue;
+    }
+
     if( std::fabs( participant.state.vx ) > params.max_static_object_speed )
     {
       continue;
@@ -457,8 +465,6 @@ find_static_obstacle_group_on_route(
       best_distance_s = distance_s;
     }
   }
-
-  (void)ego_corridor_half_width;
 
   return best_group;
 }

@@ -47,13 +47,22 @@ public:
 
   dynamics::Trajectory plan_route_trajectory( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
                                               const dynamics::TrafficParticipantSet& traffic_participants,
-                                              const dynamics::TrafficSignalSet&      traffic_signals );
+                                              const dynamics::TrafficSignalSet&      traffic_signals = {} );
 
   dynamics::Trajectory plan_route_trajectory_with_custom_comfort_settings( const map::Route&                      latest_route,
                                                                            const dynamics::VehicleStateDynamic&   current_state,
                                                                            const dynamics::TrafficParticipantSet& traffic_participants,
                                                                            const dynamics::ComfortSettings        custom_comfort_settings,
-                                                                           const dynamics::TrafficSignalSet&      traffic_signals );
+                                                                           const dynamics::TrafficSignalSet&      traffic_signals = {} );
+
+  dynamics::Trajectory plan_route_trajectory_from_s( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
+                                                     const dynamics::TrafficParticipantSet& traffic_participants,
+                                                     double initial_s );
+
+  dynamics::Trajectory plan_route_trajectory_with_custom_comfort_settings_from_s( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
+                                                     const dynamics::TrafficParticipantSet& traffic_participants,
+                                                     const dynamics::ComfortSettings custom_comfort_settings,
+                                                     double initial_s );
 
   dynamics::Trajectory optimize_trajectory( const dynamics::VehicleStateDynamic& current_state,
                                             const dynamics::Trajectory&          reference_trajectory,
@@ -109,6 +118,10 @@ private:
   mas::MotionModel     get_planning_model( const dynamics::PhysicalVehicleParameters& params );
   dynamics::Trajectory extract_trajectory();
   void                 solve_problem();
+
+  dynamics::Trajectory plan_route_trajectory_impl( const map::Route& latest_route, const dynamics::VehicleStateDynamic& current_state,
+                                                   const dynamics::TrafficParticipantSet& traffic_participants,
+                                                   double initial_s, const dynamics::ComfortSettings& custom_comfort_settings );
 };
 
 } // namespace planner

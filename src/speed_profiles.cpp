@@ -173,7 +173,10 @@ SpeedProfile::forward_pass( MapPointIter& it, MapPointIter& end_it, MapPointIter
         ? curvature_it->second
         : comfort_settings.max_speed;
 
-    double max_legal_speed = it->second.max_speed ? *it->second.max_speed : comfort_settings.max_speed;
+    // comfort_settings.max_speed is an absolute cap: where the map limit is higher
+    // it is clamped down, so a per-vehicle max_speed actually limits cruising speed.
+    double max_legal_speed = it->second.max_speed ? std::min( *it->second.max_speed, comfort_settings.max_speed )
+                                                  : comfort_settings.max_speed;
 
     max_legal_speed *= comfort_settings.speed_fraction_of_limit;
 

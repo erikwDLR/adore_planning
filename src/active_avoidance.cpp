@@ -217,6 +217,17 @@ update_obstacle_ghost_memory(
 
     for( const auto& detected_conflict : detected_conflicts )
     {
+        // Ghost memory only bridges perception dropouts for STATIC obstacles
+        // (the ones ego is steadily passing). Moving objects must never be
+        // ghosted: once an oncoming / same-direction / crossing participant
+        // leaves perception it is genuinely gone, and a retained ghost would
+        // keep braking ego after, e.g., an oncoming vehicle has already passed.
+        if( detected_conflict.object_class !=
+            planner::RouteCorridorObjectClass::StaticOrSlow )
+        {
+            continue;
+        }
+
         auto match_it =
             std::find_if(
                 state.ghost_memory.begin(),

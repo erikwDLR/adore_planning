@@ -329,10 +329,7 @@ start_active_avoidance_state(
     state.ghost_memory.clear();
 
     // A freshly (re)committed maneuver supersedes any prior oncoming-wait hold.
-    state.oncoming_wait_active = false;
-    state.oncoming_wait_participant_id = -1;
-    state.oncoming_wait_release_s = std::numeric_limits<double>::quiet_NaN();
-    state.oncoming_wait_last_seen_time = std::numeric_limits<double>::quiet_NaN();
+    state.clear_oncoming_wait();
 
     const auto memory_seed_obstacle_ids =
         oa_result.obstacle_ids.empty()

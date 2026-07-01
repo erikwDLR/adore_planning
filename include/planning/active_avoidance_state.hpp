@@ -82,6 +82,16 @@ struct ActiveAvoidanceState
   double last_modified_s = std::numeric_limits<double>::quiet_NaN();
   double last_modified_time = std::numeric_limits<double>::quiet_NaN();
 
+  // Clear the oncoming-wait latch. Used on maneuver reset, on a freshly
+  // (re)committed maneuver, and when the wait releases mid-maneuver.
+  void clear_oncoming_wait()
+  {
+    oncoming_wait_active = false;
+    oncoming_wait_participant_id = -1;
+    oncoming_wait_release_s = std::numeric_limits<double>::quiet_NaN();
+    oncoming_wait_last_seen_time = std::numeric_limits<double>::quiet_NaN();
+  }
+
   void reset()
   {
     active = false;
@@ -103,10 +113,7 @@ struct ActiveAvoidanceState
     ghost_memory.clear();
     stop_hold.reset();
 
-    oncoming_wait_active = false;
-    oncoming_wait_participant_id = -1;
-    oncoming_wait_release_s = std::numeric_limits<double>::quiet_NaN();
-    oncoming_wait_last_seen_time = std::numeric_limits<double>::quiet_NaN();
+    clear_oncoming_wait();
 
     last_modified_s = std::numeric_limits<double>::quiet_NaN();
     last_modified_time = std::numeric_limits<double>::quiet_NaN();

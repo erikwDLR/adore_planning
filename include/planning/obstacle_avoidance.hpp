@@ -12,12 +12,11 @@
 #include "planning/trajectory_planner.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
-#include <optional>
 #include <string>
 #include <vector>
-#include <array>
 
 namespace adore
 {
@@ -65,14 +64,14 @@ struct ObstacleAvoidanceParams
   bool adjacent_lane_enabled = true;
 
   // Allow use of opposite-direction lanes (oncoming lanes). Requires special
-  // oncoming traffic checks. Should remain false for baseline tests.
-  bool opposite_lane_enabled = true; //false;
+  // oncoming traffic checks.
+  bool opposite_lane_enabled = true;
 
   // Enable multi-obstacle clustering and hull-bridge behavior. If false, only
   // the nearest ego-corridor obstacle is used for OA, with no cluster/hull link.
   // If true, nearby ego-corridor obstacles form one maneuver while preserving
   // their individual obstacle hulls.
-  bool clustering_enabled = true; //false;
+  bool clustering_enabled = true;
 
   // If enabled, a lateral-shift candidate is accepted only if the ego footprint
   // remains inside the current route lane or, if the relevant mode switch is
@@ -81,7 +80,7 @@ struct ObstacleAvoidanceParams
   bool enforce_drivable_area           = true;
 
   // 0.0 disables speed capping
-  double max_speed_during_avoidance    = 2.7; // ~10 km/h
+  double max_speed_during_avoidance    = 2.78; // ~10 km/h
 
   // Distance ahead of the lateral-shift start (shift_start_s) at which the turn
   // indicator is switched on for an avoidance maneuver. The indicator is derived
@@ -110,13 +109,9 @@ struct ObstacleAvoidanceParams
   // Plausibility filter for bad route projections / unrelated objects.
   double max_object_lateral_distance  = 8.0;
 
-  // Despite the name, this is the minimum s-distance ahead of ego at which the
-  // static-obstacle search window starts (not an overlap requirement).
-  double min_obstacle_route_overlap   = 0.5;
+  // Minimum longitudinal distance ahead of ego for considering a static object.
+  double min_object_ahead             = 0.5;
   double min_oncoming_heading_diff    = 2.35; // rad, about 135 deg
-  // Time step for the synthetic hold trajectories built in the decision maker;
-  // not used by the planner library itself.
-  double stop_time_step               = 0.1;
 
   // If left and right are equally good, prefer left. This matches right-hand traffic overtaking behavior.
   bool prefer_left_shift               = true;
@@ -145,7 +140,7 @@ struct ObstacleAvoidanceParams
   // gap > shift_hull_gap_s:
   //   treat the obstacles as separate maneuvers.
   double cluster_hold_gap_s = 10.0;
-  double shift_hull_gap_s = 35.0;
+  double shift_hull_gap_s = 20.0;
 
   // Minimum shift fraction between hull-linked obstacles.
   // 0.0 = allow full return, 1.0 = keep full shift. 0.5 makes the hull visible
@@ -162,7 +157,7 @@ struct ObstacleAvoidanceParams
   // Minimum time margin before an oncoming vehicle arrives at the conflict area.
   // If the computed oncoming arrival time is <= ego_clear_time + oncoming_time_margin,
   // the maneuver is rejected.
-  double oncoming_time_margin = 2.0;
+  double oncoming_time_margin = 1.0;
 
   // Minimum speed for ego vehicle when computing clear time. Prevents division by
   // very small numbers; uses max(actual_ego_speed, min_ego_speed_for_gap_check).
@@ -186,9 +181,6 @@ struct ObstacleAvoidanceParams
   // Safety distance from ego footprint rear to oncoming vehicle front during conflict.
   double oncoming_safety_distance_rear = 5.0;
 
-  // Enable detailed debug logging for oncoming conflict checks.
-  bool debug_oncoming_check = false;
-
   // ============================================================================
   // Internal/advanced ego-lane oncoming stop behavior.
   // ============================================================================
@@ -197,11 +189,11 @@ struct ObstacleAvoidanceParams
   // and overlap the current ego lane/corridor cause a defensive stop behavior.
   // This covers the case where another vehicle temporarily uses the ego lane,
   // for example while avoiding a parked vehicle on its own side.
-  bool ego_lane_oncoming_stop_enabled = true;
+  bool ego_lane_oncoming_stop_enabled = false;
 
   // Maximum longitudinal distance ahead of ego for considering an oncoming
   // participant on the ego lane relevant.
-  double ego_lane_oncoming_max_distance = 100.0;
+  double ego_lane_oncoming_max_distance = 80.0;
 
   // Maximum time-to-conflict for triggering the defensive stop. A value <= 0.0
   // disables the time filter and uses distance only.
@@ -247,22 +239,23 @@ struct ObstacleAvoidanceParams
   // Minimum search window for route projection. Prevents degenerate route segments.
   double route_window_min = 20.0;
 
-  // Trajectory sampling step size for stop/hold trajectories. Controls granularity
-  // of state predictions during emergency deceleration.
-  double trajectory_step_size = 0.05;
-
   // Minimum speed threshold for participant motion detection. Speeds below this
   // are treated as static or negligible motion.
   double min_motion_speed = 0.05;
 
-  // Lower bound for the braking deceleration used in stop-distance and
-  // stop-profile calculations. Guards against an unset/implausible
-  // vehicle acceleration_min producing near-infinite braking distances.
+  // Nominal positive deceleration used for planned OA speed/stop profiles.
+  // This should be gentler than the vehicle's physical acceleration_min
+  // magnitude so the fallback still has braking reserve.
+  double planned_braking_deceleration = 1.0;
+
+  // Lower bound for braking deceleration calculations. Guards against an
+  // unset/implausible vehicle acceleration_min producing near-infinite braking
+  // distances.
   double min_braking_deceleration = 0.5;
 
   // Adjustment offset added to front_clearance when stop_before_obstacle < front_clearance.
-  // Ensures minimum safety distance to obstacles during emergency stop.
-  double stop_adjustment_offset = 2.0;
+  // Ensures minimum safety distance to obstacles during obstacle stops.
+  double stop_adjustment_offset = 1.0;
 
   // Lateral shift penalty score for non-in-lane candidates. Higher values penalize
   // lane-change maneuvers, encouraging in-lane solutions when available.
@@ -270,6 +263,16 @@ struct ObstacleAvoidanceParams
   double opposite_lane_penalty_score = 40.0;
 
 };
+
+double
+maximum_braking_deceleration(
+  const dynamics::PhysicalVehicleParameters& vehicle_params,
+  const ObstacleAvoidanceParams& params );
+
+double
+planned_braking_deceleration(
+  const dynamics::PhysicalVehicleParameters& vehicle_params,
+  const ObstacleAvoidanceParams& params );
 
 class RouteSpeedPolicy
 {
@@ -280,7 +283,8 @@ public:
     double shift_start_s,
     double maneuver_end_s,
     const dynamics::PhysicalVehicleParameters& vehicle_params,
-    const ObstacleAvoidanceParams& params );
+    const ObstacleAvoidanceParams& params,
+    double ego_v = std::numeric_limits<double>::infinity() );
 
   static map::Route apply_stop_profile(
     const map::Route& route,
@@ -289,24 +293,36 @@ public:
     double desired_stop_s,
     const dynamics::PhysicalVehicleParameters& vehicle_params,
     const ObstacleAvoidanceParams& params );
-};
 
-enum class StopReason
-{
-  StaticObstacleAhead,
-  OncomingOnEgoLane,
-  ModifiedRouteConflict,
-  ReplanFailed,
-  InvalidProjection,
-  EmergencyFallback
+  // Three-regime braking envelope: brake comfortably when possible, use the
+  // required intermediate deceleration while retaining desired_stop_s when it is
+  // still physically reachable, and use maximum braking toward the earliest
+  // reachable point only when desired_stop_s cannot be reached.
+  static map::Route apply_brake_envelope(
+    const map::Route& route,
+    double ego_s,
+    double ego_v,
+    double desired_stop_s,
+    const dynamics::PhysicalVehicleParameters& vehicle_params,
+    const ObstacleAvoidanceParams& params );
+
+  // Maximum-deceleration braking profile from the current position: decelerate at
+  // the physical maximum (|acceleration_min|) from the current speed down to a
+  // stop, laying sqrt(2*a_max*(stop-s)) on the route. Replaces the hard
+  // zero-from-ego fallback so unreachable / invalid stops still get a smooth
+  // speed reduction instead of an instant zero.
+  static map::Route apply_max_braking_profile(
+    const map::Route& route,
+    double ego_s,
+    double ego_v,
+    const dynamics::PhysicalVehicleParameters& vehicle_params,
+    const ObstacleAvoidanceParams& params );
 };
 
 struct StopPlan
 {
   bool valid = false;
   map::Route route;
-  double stop_s = 0.0;
-  StopReason reason = StopReason::EmergencyFallback;
 };
 
 class RouteStopPolicy
@@ -317,7 +333,6 @@ public:
     double ego_s,
     double ego_v,
     double desired_stop_s,
-    StopReason reason,
     const dynamics::PhysicalVehicleParameters& vehicle_params,
     const ObstacleAvoidanceParams& params );
 };
@@ -382,31 +397,11 @@ struct OncomingConflictResult
   // Human-readable explanation of the decision (e.g., "participant id=5 arrival_time=2.5s <= ego_clear_time=3.0s + margin=2.0s").
   std::string reason;
 
-  // Diagnostic information (only populated if debug_oncoming_check is enabled).
-  struct Diagnostics
-  {
-    int participant_id = -1;
-    double participant_s = 0.0;
-    double participant_vx = 0.0;
-    double participant_yaw = 0.0;
-    double route_yaw_at_participant_s = 0.0;
-    double yaw_diff = 0.0;
-    double v_route = 0.0;  // Route-aligned velocity (positive = route direction, negative = oncoming)
-    double heading_diff_rad = 0.0;
-  } diagnostics;
 };
 
 struct EgoLaneOncomingStopResult
 {
   bool success = false;
-  std::string reason;
-
-  int participant_id = -1;
-  double participant_s = 0.0;
-  double participant_distance_s = 0.0;
-  double participant_route_speed = 0.0;
-  double time_to_conflict = std::numeric_limits<double>::infinity();
-  double stop_s = 0.0;
 
   map::Route modified_route;
   dynamics::Trajectory trajectory;
@@ -442,9 +437,6 @@ struct RouteCorridorConflict
   bool currently_overlaps_ego_footprint = false;
   bool predicted_spatiotemporal_conflict = false;
   bool requires_stop = false;
-  bool allows_replan = true;
-
-  std::string ttc_source;
 
   double object_center_x = std::numeric_limits<double>::quiet_NaN();
   double object_center_y = std::numeric_limits<double>::quiet_NaN();
@@ -454,8 +446,6 @@ struct RouteCorridorConflict
   std::array<double, 4> footprint_x{};
   std::array<double, 4> footprint_y{};
   bool has_world_footprint = false;
-
-  bool currently_inside_corridor = false;
 
   std::string reason;
 };
@@ -494,7 +484,6 @@ struct ObstacleGhostEnvelope
   int consecutive_missing_cycles = 0;
   bool hold_until_passed = false;
   bool created_from_original_avoidance_obstacle = false;
-  bool created_from_active_route_conflict = false;
   bool is_ghost = false;
   int last_participant_id = -1;
 
@@ -517,11 +506,8 @@ struct ObstacleAvoidanceManeuver
   int obstacle_id = -1;
   std::vector<int> obstacle_ids;
   double obstacle_s_min = std::numeric_limits<double>::infinity();
-  double obstacle_s_max = -std::numeric_limits<double>::infinity();
 
   double shift_start_s = 0.0;
-  double plateau_start_s = 0.0;
-  double plateau_end_s = 0.0;
   double shift_end_s = 0.0;
   double release_s = 0.0;
 
@@ -554,7 +540,6 @@ struct ObstacleAvoidanceMonitorResult
 };
 
 struct ObstacleAvoidanceResult
-
 {
   bool success = false;
   std::string reason;
@@ -568,11 +553,8 @@ struct ObstacleAvoidanceResult
   int obstacle_id = -1;
   std::vector<int> obstacle_ids;
   double obstacle_s_min = std::numeric_limits<double>::infinity();
-  double obstacle_s_max = -std::numeric_limits<double>::infinity();
 
   double shift_start_s = 0.0;
-  double plateau_start_s = 0.0;
-  double plateau_end_s = 0.0;
   double shift_end_s = 0.0;
 
   double lateral_shift = 0.0;
@@ -658,7 +640,7 @@ is_oncoming_other_lane_conflict(
 }
 
 /**
- * Obstacle avoidance for the current eclipse-adore/bugfix/revert_to_make API.
+ * Plan obstacle avoidance by modifying a copy of the route reference line.
  *
  * The planner does not publish or create a separate shifted path here. It modifies
  * the points of a copy of the original route and then calls TrajectoryPlanner on
@@ -687,7 +669,8 @@ trajectory_stops_before_conflict(
   const map::Route& route,
   const RouteCorridorConflict& conflict,
   const dynamics::PhysicalVehicleParameters& ego_params,
-  const ObstacleAvoidanceParams& params = {} );
+  const ObstacleAvoidanceParams& params = {},
+  bool use_maximum_braking_deceleration = false );
 
 ObstacleAvoidanceMonitorResult
 monitor_active_obstacle_avoidance_maneuver(

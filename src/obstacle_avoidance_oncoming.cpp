@@ -154,30 +154,9 @@ find_ego_lane_oncoming_threat(
     }
 
     EgoLaneOncomingThreat threat;
-    threat.valid = true;
     threat.participant_id = static_cast<int>( id );
     threat.participant_near_s = participant_near_s;
-    threat.participant_center_s = footprint->center_s;
-    threat.distance_s = std::max( 0.0, distance_s );
-    threat.v_route = v_route;
     threat.time_to_conflict = time_to_conflict;
-    threat.stop_s =
-      participant_near_s
-      - params.ego_lane_oncoming_stop_distance
-      - ego_front_offset;
-
-    char buf[256];
-    std::snprintf(
-      buf,
-      sizeof( buf ),
-      "ego-lane oncoming participant id=%d s=%.2f distance=%.2f v_route=%.2f ttc=%.2f stop_s=%.2f",
-      threat.participant_id,
-      threat.participant_center_s,
-      threat.distance_s,
-      threat.v_route,
-      threat.time_to_conflict,
-      threat.stop_s );
-    threat.reason = buf;
 
     if( !best_threat.has_value() ||
         threat.time_to_conflict < best_threat->time_to_conflict )
@@ -692,7 +671,6 @@ check_oncoming_gap( const map::Route& route,
     {
       if( heading_opposite && participant_in_conflict_interval )
       {
-        oncoming_detected = true;
         result.conflict = true;
         result.participant_id = static_cast<int>( id );
         result.oncoming_arrival_time = 0.0;
@@ -731,7 +709,6 @@ check_oncoming_gap( const map::Route& route,
         if( slow_arrival_time <=
             result.ego_clear_time + params.oncoming_time_margin )
         {
-          oncoming_detected = true;
           result.conflict = true;
           result.participant_id = static_cast<int>( id );
           result.oncoming_arrival_time = slow_arrival_time;
@@ -765,7 +742,6 @@ check_oncoming_gap( const map::Route& route,
         std::fabs( v_route ) );
 
     double arrival_time = std::numeric_limits<double>::infinity();
-    double distance_to_conflict = std::numeric_limits<double>::infinity();
     const char* arrival_source = "constant_velocity";
 
     bool used_trajectory = false;
@@ -784,7 +760,6 @@ check_oncoming_gap( const map::Route& route,
       if( trajectory_arrival.has_value() )
       {
         arrival_time = trajectory_arrival.value();
-        distance_to_conflict = arrival_time * oncoming_speed;
         arrival_source = "trajectory";
         used_trajectory = true;
       }
@@ -798,13 +773,13 @@ check_oncoming_gap( const map::Route& route,
         // The oncoming vehicle is already in the longitudinal interval where ego
         // would occupy the opposite lane.
         arrival_time = 0.0;
-        distance_to_conflict = 0.0;
       }
       else if( participant_s > result.conflict_end_s )
       {
         // Oncoming traffic is ahead on the route and moves toward decreasing s.
         // Therefore the distance to the conflict interval is participant_s - end.
-        distance_to_conflict = participant_s - result.conflict_end_s;
+        const double distance_to_conflict =
+          participant_s - result.conflict_end_s;
         arrival_time = distance_to_conflict / oncoming_speed;
       }
       else
@@ -830,18 +805,6 @@ check_oncoming_gap( const map::Route& route,
       result.conflict = true;
       result.participant_id = static_cast<int>( id );
       result.oncoming_arrival_time = arrival_time;
-
-      if( params.debug_oncoming_check )
-      {
-        result.diagnostics.participant_id = static_cast<int>( id );
-        result.diagnostics.participant_s = participant_s;
-        result.diagnostics.participant_vx = participant.state.vx;
-        result.diagnostics.participant_yaw = participant.state.yaw_angle;
-        result.diagnostics.route_yaw_at_participant_s = route_yaw;
-        result.diagnostics.yaw_diff = yaw_diff;
-        result.diagnostics.v_route = v_route;
-        result.diagnostics.heading_diff_rad = std::fabs( yaw_diff );
-      }
 
       char buf[384];
       std::snprintf(

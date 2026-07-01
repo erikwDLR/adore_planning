@@ -106,8 +106,6 @@ project_obstacle_to_route_analytic( const map::Route& route,
   envelope.l_min =  std::numeric_limits<double>::infinity();
   envelope.l_max = -std::numeric_limits<double>::infinity();
 
-  envelope.object_count = 1;
-
   const double center_x = participant.state.x;
   const double center_y = participant.state.y;
   const double yaw      = participant.state.yaw_angle;

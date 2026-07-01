@@ -163,7 +163,6 @@ append_obstacle_to_avoidance_group( AvoidanceGroup& group,
     std::min( group.envelope.object_l_min, obstacle.object_l_min );
   group.envelope.object_l_max =
     std::max( group.envelope.object_l_max, obstacle.object_l_max );
-  group.envelope.object_count += obstacle.object_count;
   group.envelope.participant_ids.insert(
     group.envelope.participant_ids.end(),
     obstacle.participant_ids.begin(),
@@ -256,7 +255,7 @@ find_static_obstacle_group_on_route(
     0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const double side_clearance = std::max( 0.0, params.side_clearance );
 
-  const double search_start_s = ego_s + params.min_obstacle_route_overlap;
+  const double search_start_s = ego_s + params.min_object_ahead;
   const double search_end_s   = ego_s + params.max_object_ahead;
 
   const double cluster_search_end_s =

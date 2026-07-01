@@ -8,7 +8,6 @@
 
 #include <limits>
 #include <optional>
-#include <string>
 
 #include <adore_map/route.hpp>
 
@@ -97,7 +96,6 @@ struct RouteStopPlan
   double brake_start_s = std::numeric_limits<double>::quiet_NaN();
   double required_braking_distance = 0.0;
   double braking_deceleration = 0.0;
-  std::string reason;
 };
 
 // Build a RouteCorridorConflict from an active opposite-lane monitor result so
@@ -106,8 +104,7 @@ struct RouteStopPlan
 RouteCorridorConflict
 make_oncoming_monitor_conflict(
   const ObstacleAvoidanceMonitorResult& monitor_result,
-  double reference_s,
-  const char* ttc_source );
+  double reference_s );
 
 // True if a static/slow conflict keeps at least side_clearance to a route-
 // centered ego footprint, so ego can keep going without stopping.

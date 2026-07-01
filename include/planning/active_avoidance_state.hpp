@@ -62,6 +62,19 @@ struct ActiveAvoidanceState
   // resuming while approaching the obstacle.
   std::optional<ObstacleGhostEnvelope> stop_hold;
 
+  // Oncoming-wait latch. Once the opposite-lane monitor decides to stop for an
+  // oncoming participant, hold that stop until the participant has cleared the
+  // conflict interval (or vanished for a hold time), instead of re-deciding
+  // go/stop every cycle. Re-deciding each cycle near the decision boundary makes
+  // ego oscillate between braking and creeping while it waits. oncoming_wait_release_s
+  // is the near edge (conflict_start_s) of the opposite-lane conflict interval; the
+  // oncoming travels against the route direction, so it has cleared once its route-s
+  // drops below this value.
+  bool   oncoming_wait_active = false;
+  int    oncoming_wait_participant_id = -1;
+  double oncoming_wait_release_s = std::numeric_limits<double>::quiet_NaN();
+  double oncoming_wait_last_seen_time = std::numeric_limits<double>::quiet_NaN();
+
   // Last valid projection on the active modified route. This keeps progress
   // monotonic while the route is laterally offset from the mission route.
   // last_modified_time records when that projection was taken so implausible
@@ -89,6 +102,11 @@ struct ActiveAvoidanceState
     maneuver = ObstacleAvoidanceManeuver{};
     ghost_memory.clear();
     stop_hold.reset();
+
+    oncoming_wait_active = false;
+    oncoming_wait_participant_id = -1;
+    oncoming_wait_release_s = std::numeric_limits<double>::quiet_NaN();
+    oncoming_wait_last_seen_time = std::numeric_limits<double>::quiet_NaN();
 
     last_modified_s = std::numeric_limits<double>::quiet_NaN();
     last_modified_time = std::numeric_limits<double>::quiet_NaN();

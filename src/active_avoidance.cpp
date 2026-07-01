@@ -67,8 +67,7 @@ planner::ObstacleGhostEnvelope
 make_ghost_envelope(
     const planner::RouteCorridorConflict& conflict,
     double now,
-    const planner::ObstacleAvoidanceParams& params,
-    bool created_from_active_route_conflict )
+    const planner::ObstacleAvoidanceParams& params )
 {
     planner::ObstacleGhostEnvelope envelope;
     envelope.object_s_min = conflict.object_s_min;
@@ -89,7 +88,6 @@ make_ghost_envelope(
         std::max( 0.0, params.ghost_obstacle_release_extra_s );
     envelope.hold_until_passed =
         conflict.object_class == planner::RouteCorridorObjectClass::StaticOrSlow;
-    envelope.created_from_active_route_conflict = created_from_active_route_conflict;
     envelope.is_ghost = false;
     envelope.last_participant_id = conflict.participant_id;
     envelope.object_center_x = conflict.object_center_x;
@@ -182,7 +180,7 @@ make_original_obstacle_envelope_from_participant(
     conflict.inflated_l_min = conflict.object_l_min - std::max( 0.0, params.side_clearance );
     conflict.inflated_l_max = conflict.object_l_max + std::max( 0.0, params.side_clearance );
 
-    auto envelope = make_ghost_envelope( conflict, now, params, false );
+    auto envelope = make_ghost_envelope( conflict, now, params );
     envelope.created_from_original_avoidance_obstacle = true;
     envelope.hold_until_passed = true;
     return envelope;
@@ -242,7 +240,7 @@ update_obstacle_ghost_memory(
                 } );
 
         const auto updated =
-            make_ghost_envelope( detected_conflict, now, params, true );
+            make_ghost_envelope( detected_conflict, now, params );
 
         if( match_it != state.ghost_memory.end() )
         {
@@ -329,6 +327,12 @@ start_active_avoidance_state(
     state.last_modified_s = std::numeric_limits<double>::quiet_NaN();
     state.last_modified_time = std::numeric_limits<double>::quiet_NaN();
     state.ghost_memory.clear();
+
+    // A freshly (re)committed maneuver supersedes any prior oncoming-wait hold.
+    state.oncoming_wait_active = false;
+    state.oncoming_wait_participant_id = -1;
+    state.oncoming_wait_release_s = std::numeric_limits<double>::quiet_NaN();
+    state.oncoming_wait_last_seen_time = std::numeric_limits<double>::quiet_NaN();
 
     const auto memory_seed_obstacle_ids =
         oa_result.obstacle_ids.empty()
@@ -417,9 +421,6 @@ most_relevant_ghost_conflict(
         conflict.time_to_conflict = 0.0;
         conflict.currently_overlaps_route_corridor = true;
         conflict.requires_stop = true;
-        conflict.allows_replan = true;
-        conflict.ttc_source = "ghost";
-        conflict.currently_inside_corridor = true;
         conflict.object_center_x = envelope.object_center_x;
         conflict.object_center_y = envelope.object_center_y;
         conflict.object_yaw = envelope.object_yaw;
@@ -465,8 +466,7 @@ find_unpassed_original_ghost(
 planner::RouteCorridorConflict
 make_oncoming_monitor_conflict(
     const planner::ObstacleAvoidanceMonitorResult& monitor_result,
-    double reference_s,
-    const char* ttc_source )
+    double reference_s )
 {
     planner::RouteCorridorConflict conflict;
     conflict.participant_id = monitor_result.oncoming.participant_id;
@@ -478,7 +478,6 @@ make_oncoming_monitor_conflict(
     conflict.time_to_conflict = monitor_result.oncoming.oncoming_arrival_time;
     conflict.predicted_spatiotemporal_conflict = true;
     conflict.requires_stop = true;
-    conflict.ttc_source = ttc_source;
     conflict.reason = monitor_result.reason;
     return conflict;
 }
@@ -530,7 +529,6 @@ compute_route_stop_plan(
 
     if( !std::isfinite( plan.ego_s ) )
     {
-        plan.reason = "invalid ego projection";
         return plan;
     }
 
@@ -547,7 +545,7 @@ compute_route_stop_plan(
         ego_front_offset;
 
     plan.braking_deceleration =
-        std::max( params.min_braking_deceleration, std::fabs( vehicle_params.acceleration_min ) );
+        planned_braking_deceleration( vehicle_params, params );
     plan.required_braking_distance =
         std::max( 0.0, ego.vx ) * std::max( 0.0, ego.vx ) /
         ( 2.0 * plan.braking_deceleration );
@@ -558,7 +556,6 @@ compute_route_stop_plan(
     plan.valid =
         std::isfinite( plan.stop_s ) &&
         std::isfinite( plan.brake_start_s );
-    plan.reason = plan.valid ? "valid" : "invalid stop geometry";
 
     return plan;
 }
@@ -644,15 +641,6 @@ compute_monotonic_ego_s_modified(
                  max_plausible_advance )
         {
             ego_s_modified = state.last_modified_s + odometry_advance;
-            // std::fprintf(
-                // stderr,
-                // "[OA][WARN] implausible ego_s_modified jump raw=%.2f last=%.2f "
-                // "max_advance=%.2f; using odometry advance to %.2f\n",
-                // ego_s_modified_raw,
-                // state.last_modified_s,
-                // max_plausible_advance,
-                // ego_s_modified );
-            // std::fflush( stderr );
         }
     }
     else if( !std::isfinite( ego_s_modified_raw ) &&
@@ -660,11 +648,6 @@ compute_monotonic_ego_s_modified(
     {
         // Fallback: projection lost, use last valid value
         ego_s_modified = state.last_modified_s;
-        // std::fprintf(
-            // stderr,
-            // "[OA][WARN] ego_s_modified projection lost; using last_modified_s=%.2f\n",
-            // state.last_modified_s );
-        // std::fflush( stderr );
     }
 
     if( !std::isfinite( ego_s_modified ) )

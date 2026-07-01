@@ -473,7 +473,6 @@ generate_opposite_lane_candidate_variants(
     LateralInterval opposite_intersection;
     bool initialized = false;
     bool all_samples_usable = true;
-    std::string last_reason;
 
     for( const double sample_s : sample_s_values )
     {
@@ -481,7 +480,6 @@ generate_opposite_lane_candidate_variants(
       if( !route_point.has_value() )
       {
         all_samples_usable = false;
-        last_reason = "no route point near sample_s";
         break;
       }
 
@@ -496,7 +494,6 @@ generate_opposite_lane_candidate_variants(
       if( !opposite_query.map_usable || !opposite_query.has_opposite_lane )
       {
         all_samples_usable = false;
-        last_reason = opposite_query.reason;
         break;
       }
 
@@ -616,6 +613,12 @@ validate_planned_shift_trajectory(
     ego_params.wheelbase + ego_params.front_axle_to_front_border;
   const double ego_rear_offset =
     ego_params.rear_border_to_rear_axle;
+  // Route points are shifted in the original route frame and the resulting
+  // trajectory is then interpolated and projected back onto that frame. On
+  // curved/discretized map segments this round trip introduces millimetre- to
+  // centimetre-scale lateral error. Keep the configured clearance in route
+  // construction exact, but do not reject that route for numerical noise.
+  constexpr double geometry_validation_tolerance = 0.02;
   double previous_s = initial_s_hint;
 
   for( const auto& state : trajectory.states )
@@ -751,7 +754,7 @@ validate_planned_shift_trajectory(
     result.min_lane_margin =
       std::min( result.min_lane_margin, lane_margin );
 
-    if( lane_margin < 0.0 )
+    if( lane_margin < -geometry_validation_tolerance )
     {
       char buf[256];
       std::snprintf(
@@ -790,7 +793,7 @@ validate_planned_shift_trajectory(
         result.min_obstacle_lateral_margin =
           std::min( result.min_obstacle_lateral_margin, obstacle_lateral_margin );
 
-        if( obstacle_lateral_margin < 0.0 )
+        if( obstacle_lateral_margin < -geometry_validation_tolerance )
         {
 
           char buf[256];

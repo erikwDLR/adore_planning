@@ -45,8 +45,15 @@ avoidance_shift_alpha_at_s( double s,
                             const ObstacleEnvelope& obstacle,
                             const ObstacleAvoidanceParams& params )
 {
+  // Shift geometry keyed directly to the obstacle: the lateral shift ramps up over
+  // front_clearance ahead of the obstacle, holds full shift alongside it
+  // [object_s_min, object_s_max], and ramps back down over rear_clearance behind
+  // it. With equal clearances this is symmetric about the obstacle. front_clearance
+  // and rear_clearance are the only longitudinal knobs (no implicit ego offset).
   const double shift_start_s =
-    std::max( 0.0, obstacle.object_s_min - std::max( 0.0, params.front_clearance ) );
+    std::max(
+      0.0,
+      obstacle.object_s_min - std::max( 0.0, params.front_clearance ) );
   const double shift_end_s =
     obstacle.object_s_max + std::max( 0.0, params.rear_clearance );
 
@@ -70,104 +77,6 @@ avoidance_shift_alpha_at_s( double s,
   return 1.0 - smoothstep01(
     ( s - obstacle.object_s_max ) /
     std::max( 0.1, shift_end_s - obstacle.object_s_max ) );
-}
-
-AvoidanceAlphaSample
-avoidance_shift_alpha_at_s( double s,
-                            const AvoidanceGroup& group,
-                            const ObstacleAvoidanceParams& params )
-{
-  AvoidanceAlphaSample sample;
-
-  for( const auto& obstacle : group.obstacles )
-  {
-    sample.alpha =
-      std::max(
-        sample.alpha,
-        avoidance_shift_alpha_at_s( s, obstacle, params ) );
-  }
-
-  if( ( group.uses_hull_curve || group.hard_merged ) &&
-      group.obstacles.size() >= 2 )
-  {
-    const double hard_merge_gap_s =
-      std::max( 0.0, params.cluster_hold_gap_s );
-    const double shift_hull_gap_s =
-      std::max( hard_merge_gap_s, params.shift_hull_gap_s );
-
-    for( std::size_t i = 1; i < group.obstacles.size(); ++i )
-    {
-      const auto& previous = group.obstacles[i - 1];
-      const auto& next = group.obstacles[i];
-
-      const double raw_gap_s = next.object_s_min - previous.object_s_max;
-      if( raw_gap_s > shift_hull_gap_s )
-      {
-        continue;
-      }
-
-      if( raw_gap_s <= hard_merge_gap_s )
-      {
-        const double bridge_alpha =
-          hard_bridge_alpha_at_s( s, previous, next, params );
-        if( bridge_alpha <= 0.0 )
-        {
-          continue;
-        }
-
-        if( bridge_alpha > sample.alpha )
-        {
-          sample.alpha = bridge_alpha;
-          sample.source = "hard_bridge";
-        }
-        continue;
-      }
-
-      const double bridge_floor =
-        std::clamp( params.min_alpha_between_hull_obstacles, 0.0, 1.0 );
-
-      const double bridge_start_s = previous.object_s_max;
-
-      const double bridge_end_s = next.object_s_min;
-
-      if( s < bridge_start_s || s > bridge_end_s )
-      {
-        continue;
-      }
-
-      double bridge_alpha = 1.0;
-
-      if( bridge_end_s > bridge_start_s + 0.1 )
-      {
-        const double t =
-          std::clamp(
-            ( s - bridge_start_s ) / ( bridge_end_s - bridge_start_s ),
-            0.0,
-            1.0 );
-
-        if( t <= 0.5 )
-        {
-          bridge_alpha =
-            1.0 - ( 1.0 - bridge_floor ) * smoothstep01( 2.0 * t );
-        }
-        else
-        {
-          bridge_alpha =
-            bridge_floor +
-            ( 1.0 - bridge_floor ) * smoothstep01( 2.0 * t - 1.0 );
-        }
-      }
-
-      if( bridge_alpha > sample.alpha )
-      {
-        sample.alpha = bridge_alpha;
-        sample.source = "bridge";
-      }
-    }
-  }
-
-  sample.alpha = std::clamp( sample.alpha, 0.0, 1.0 );
-  return sample;
 }
 
 double
@@ -212,8 +121,13 @@ hard_bridge_alpha_at_s( double s,
                         const ObstacleEnvelope& next,
                         const ObstacleAvoidanceParams& params )
 {
+  // Clearance-based cluster bounds (see avoidance_shift_alpha_at_s): ramp up over
+  // front_clearance before the first obstacle, hold across the cluster, ramp down
+  // over rear_clearance after the last obstacle. No implicit ego offset.
   const double bridge_start_s =
-    std::max( 0.0, previous.object_s_min - std::max( 0.0, params.front_clearance ) );
+    std::max(
+      0.0,
+      previous.object_s_min - std::max( 0.0, params.front_clearance ) );
   const double bridge_end_s =
     next.object_s_max + std::max( 0.0, params.rear_clearance );
 
@@ -251,7 +165,8 @@ avoidance_shift_offset_at_s(
 
   for( const auto& obstacle : group.obstacles )
   {
-    const double alpha = avoidance_shift_alpha_at_s( s, obstacle, params );
+    const double alpha =
+      avoidance_shift_alpha_at_s( s, obstacle, params );
     if( alpha <= 0.0 )
     {
       continue;
@@ -317,8 +232,14 @@ avoidance_shift_offset_at_s(
         continue;
       }
 
-      const double bridge_start_s = previous.object_s_max;
-      const double bridge_end_s = next.object_s_min;
+      const double bridge_start_s =
+        previous.object_s_max +
+        std::max( 0.0, ego_params.rear_border_to_rear_axle );
+      const double bridge_end_s =
+        next.object_s_min -
+        std::max(
+          0.0,
+          ego_params.wheelbase + ego_params.front_axle_to_front_border );
 
       if( s < bridge_start_s || s > bridge_end_s ||
           bridge_end_s <= bridge_start_s + 0.1 )
@@ -391,14 +312,14 @@ build_modified_avoidance_route( const map::Route& route,
     point.y = shifted_point_xy.y;
   }
 
+  // Clearance-based shift window (see avoidance_shift_alpha_at_s): matches the
+  // lateral shift window so the speed profile ramps over the same span.
   const double shift_start_s =
     std::max(
       0.0,
-      group.envelope.object_s_min -
-      std::max( 0.0, params.front_clearance ) );
+      group.envelope.object_s_min - std::max( 0.0, params.front_clearance ) );
   const double shift_end_s =
-    group.envelope.object_s_max +
-    std::max( 0.0, params.rear_clearance );
+    group.envelope.object_s_max + std::max( 0.0, params.rear_clearance );
   apply_avoidance_speed_profile(
     modified_route,
     ego_s,

@@ -118,8 +118,6 @@ struct ObstacleEnvelope
   double center_s = std::numeric_limits<double>::infinity();
   double center_l = 0.0;
 
-  std::size_t object_count = 1;
-
   bool overlaps_ego_corridor = false;
 };
 
@@ -227,12 +225,6 @@ find_static_obstacle_group_on_route(
 // Lateral-shift profile math + modified-route construction (obstacle_avoidance_shift.cpp)
 // ---------------------------------------------------------------------------
 
-struct AvoidanceAlphaSample
-{
-  double alpha = 0.0;
-  const char* source = "max";
-};
-
 void
 apply_avoidance_speed_profile( map::Route& route,
                                double ego_s,
@@ -244,11 +236,6 @@ apply_avoidance_speed_profile( map::Route& route,
 double
 avoidance_shift_alpha_at_s( double s,
                             const ObstacleEnvelope& obstacle,
-                            const ObstacleAvoidanceParams& params );
-
-AvoidanceAlphaSample
-avoidance_shift_alpha_at_s( double s,
-                            const AvoidanceGroup& group,
                             const ObstacleAvoidanceParams& params );
 
 double
@@ -358,17 +345,9 @@ struct OppositeLaneConflictInterval
 
 struct EgoLaneOncomingThreat
 {
-  bool valid = false;
-
   int participant_id = -1;
   double participant_near_s = 0.0;
-  double participant_center_s = 0.0;
-  double distance_s = 0.0;
-  double v_route = 0.0;
   double time_to_conflict = std::numeric_limits<double>::infinity();
-  double stop_s = 0.0;
-
-  std::string reason;
 };
 
 bool
@@ -478,7 +457,6 @@ struct RouteShiftPlanCandidate
 
   double ego_s_modified = std::numeric_limits<double>::quiet_NaN();
   double score = std::numeric_limits<double>::infinity();
-  std::string rejection_reason;
 };
 
 bool
@@ -551,7 +529,7 @@ score_route_shift_candidate( const RouteShiftPlanCandidate& candidate,
                              const ObstacleAvoidanceParams& params );
 
 // ---------------------------------------------------------------------------
-// Stop / hold route + trajectory construction (obstacle_avoidance_stop_route.cpp)
+// Stop-route construction (obstacle_avoidance_stop_route.cpp)
 // ---------------------------------------------------------------------------
 
 double
@@ -571,7 +549,6 @@ build_stop_route_before_obstacle(
   const dynamics::VehicleStateDynamic& ego,
   const dynamics::PhysicalVehicleParameters& vehicle_params,
   double stop_before_obstacle,
-  double safety_margin,
   const ObstacleAvoidanceParams& params );
 
 } // namespace oa_detail

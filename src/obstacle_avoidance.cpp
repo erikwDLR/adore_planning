@@ -1634,12 +1634,34 @@ trajectory_stops_before_conflict(
 }
 
 
+bool
+participant_has_side_clearance_to_route_corridor(
+  const map::Route& route,
+  const dynamics::TrafficParticipant& participant,
+  const dynamics::PhysicalVehicleParameters& ego_params,
+  const ObstacleAvoidanceParams& params )
+{
+  const auto footprint =
+    project_participant_footprint_to_route( route, participant, params );
+  if( !footprint.has_value() )
+  {
+    return false;
+  }
+
+  const double ego_half_width =
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
+  return actual_lateral_clearance_to_centered_ego(
+           footprint->l_min, footprint->l_max, ego_half_width )
+         >= std::max( 0.0, params.side_clearance );
+}
+
 ObstacleAvoidanceMonitorResult
 monitor_active_obstacle_avoidance_maneuver(
   const map::Route& route,
   const dynamics::VehicleStateDynamic& ego,
   const dynamics::TrafficParticipantSet& traffic_participants,
   const ObstacleAvoidanceManeuver& maneuver,
+  const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params,
   const dynamics::Trajectory* candidate_ego_trajectory )
 {
@@ -1765,6 +1787,19 @@ monitor_active_obstacle_avoidance_maneuver(
     {
       if( heading_opposite && participant_in_conflict_interval )
       {
+        // A fully stopped opposite-direction vehicle is assumed to be yielding.
+        // If it keeps at least side_clearance to the route-centered ego corridor
+        // (this monitor runs on the current/modified route ego drives), it does not
+        // geometrically obstruct the driven path, so continue the maneuver instead
+        // of holding indefinitely. Only for a genuinely stopped participant - a
+        // moving one could still enter the corridor and keeps the time-gap logic.
+        if( participant_speed <= params.max_static_object_speed &&
+            participant_has_side_clearance_to_route_corridor(
+              route, participant, ego_params, params ) )
+        {
+          continue;
+        }
+
         result.oncoming.conflict = true;
         result.oncoming.participant_id = participant_id;
         result.oncoming.oncoming_arrival_time = 0.0;

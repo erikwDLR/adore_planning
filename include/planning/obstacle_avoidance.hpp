@@ -639,6 +639,18 @@ is_oncoming_other_lane_conflict(
   return actual_clearance >= std::max( 0.0, params.side_clearance );
 }
 
+// True if the participant keeps at least side_clearance to a route-centered ego
+// footprint on the given route, i.e. it does not geometrically obstruct the driven
+// corridor. Projects the participant's footprint onto the route internally, so node
+// code (which cannot reach the internal projection helpers) can share the exact same
+// lateral-clearance rule as the active-maneuver monitor.
+bool
+participant_has_side_clearance_to_route_corridor(
+  const map::Route& route,
+  const dynamics::TrafficParticipant& participant,
+  const dynamics::PhysicalVehicleParameters& ego_params,
+  const ObstacleAvoidanceParams& params );
+
 /**
  * Plan obstacle avoidance by modifying a copy of the route reference line.
  *
@@ -678,6 +690,7 @@ monitor_active_obstacle_avoidance_maneuver(
   const dynamics::VehicleStateDynamic& ego,
   const dynamics::TrafficParticipantSet& traffic_participants,
   const ObstacleAvoidanceManeuver& maneuver,
+  const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params = {},
   const dynamics::Trajectory* candidate_ego_trajectory = nullptr );
 

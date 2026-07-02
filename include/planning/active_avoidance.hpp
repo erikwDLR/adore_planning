@@ -46,9 +46,9 @@ update_obstacle_ghost_memory(
   double now,
   const ObstacleAvoidanceParams& params );
 
-// Initialise the active maneuver state from a planned avoidance result and seed
-// the ghost memory from the original obstacles (optionally preserving the
-// existing ghost memory across a dynamic replan).
+// Initialise the active maneuver state from a planned avoidance result. When
+// ghost memory is enabled, seed it from the original obstacles (optionally
+// preserving existing memory across a dynamic replan); otherwise leave it empty.
 void
 start_active_avoidance_state(
   ActiveAvoidanceState& state,

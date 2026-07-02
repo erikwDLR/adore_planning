@@ -194,6 +194,16 @@ update_obstacle_ghost_memory(
     double now,
     const planner::ObstacleAvoidanceParams& params )
 {
+    // Master switch: with ghosting disabled, never retain memory of obstacles that
+    // left perception. A disappearing detection (e.g. a pedestrian mis-detected as
+    // an obstacle) then stops asserting a conflict immediately instead of being
+    // held until ego passes its remembered position.
+    if( !params.ghost_memory_enabled )
+    {
+        state.ghost_memory.clear();
+        return;
+    }
+
     for( auto& envelope : state.ghost_memory )
     {
         envelope.is_ghost = true;
@@ -284,9 +294,9 @@ update_obstacle_ghost_memory(
                           std::max( 1, params.ghost_dynamic_max_missing_cycles ) );
                 const bool lifetime_release =
                     envelope.is_ghost &&
-                    !envelope.created_from_original_avoidance_obstacle &&
                     std::isfinite( envelope.first_seen_time ) &&
-                    now >= envelope.first_seen_time + std::max( params.ghost_obstacle_hold_time, params.ghost_obstacle_max_lifetime );
+                    now >= envelope.first_seen_time +
+                               std::max( 0.0, params.ghost_obstacle_max_lifetime );
 
                 return passed_release || timeout_release || lifetime_release;
             } ),
@@ -304,7 +314,7 @@ start_active_avoidance_state(
     bool preserve_existing_ghost_memory )
 {
     const auto previous_ghost_memory =
-        preserve_existing_ghost_memory
+        params.ghost_memory_enabled && preserve_existing_ghost_memory
             ? state.ghost_memory
             : std::vector<planner::ObstacleGhostEnvelope>{};
 
@@ -330,6 +340,14 @@ start_active_avoidance_state(
 
     // A freshly (re)committed maneuver supersedes any prior oncoming-wait hold.
     state.clear_oncoming_wait();
+
+    // The maneuver itself remains active, but a disabled master switch must not
+    // seed or preserve any obstacle memory—not even for the first cycle after a
+    // fresh plan or dynamic replan.
+    if( !params.ghost_memory_enabled )
+    {
+        return;
+    }
 
     const auto memory_seed_obstacle_ids =
         oa_result.obstacle_ids.empty()

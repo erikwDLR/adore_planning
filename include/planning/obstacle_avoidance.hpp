@@ -220,10 +220,15 @@ struct ObstacleAvoidanceParams
   double min_valid_stop_margin = 1.0;
 
   // Ghost memory for obstacles that were relevant during an active avoidance state.
+  // Master switch: when false no disappeared obstacle or participant is
+  // remembered by ghost memory, stop-hold, or oncoming-wait dropout bridging.
+  bool ghost_memory_enabled = true;
   double ghost_obstacle_hold_time = 2.0;
   double ghost_obstacle_release_extra_s = 5.0;
   double ghost_obstacle_match_s_margin = 3.0;
   double ghost_obstacle_match_l_margin = 1.0;
+  // Hard upper bound for every ghost, including the obstacle that created the
+  // active maneuver. Release by ego progress may end the hold earlier.
   double ghost_obstacle_max_lifetime = 10.0;
   int ghost_dynamic_max_missing_cycles = 5;
 

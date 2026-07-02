@@ -1131,7 +1131,7 @@ check_route_corridor_safety(
   const double ego_half_width =
     0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const double corridor_half_width =
-    ego_half_width + std::max( 0.0, params.side_clearance );
+    ego_half_width + std::max( 0.0, params.ego_corridor_safety_margin );
   const double check_start_s =
     ego_s - std::max( 0.0, params.rear_clearance );
   const double check_end_s =

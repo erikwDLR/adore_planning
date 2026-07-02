@@ -232,14 +232,15 @@ avoidance_shift_offset_at_s(
         continue;
       }
 
-      const double bridge_start_s =
-        previous.object_s_max +
-        std::max( 0.0, ego_params.rear_border_to_rear_axle );
-      const double bridge_end_s =
-        next.object_s_min -
-        std::max(
-          0.0,
-          ego_params.wheelbase + ego_params.front_axle_to_front_border );
+      // Span the bridge over the full physical gap between the obstacles. The
+      // endpoints then coincide with the full per-obstacle shift plateaus
+      // (alpha=1, shift=prev/next) at object_s_max / object_s_min, so the
+      // bridge hands off to them seamlessly (C1). Insetting by ego geometry
+      // moved the endpoints into the per-obstacle ramp-down/ramp-up regions,
+      // where the max() source switches and creates a slope kink -> a curvature
+      // spike that is barely visible on a straight but obvious through a curve.
+      const double bridge_start_s = previous.object_s_max;
+      const double bridge_end_s = next.object_s_min;
 
       if( s < bridge_start_s || s > bridge_end_s ||
           bridge_end_s <= bridge_start_s + 0.1 )

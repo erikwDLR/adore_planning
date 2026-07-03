@@ -21,10 +21,10 @@ namespace planner
 {
 
 // Persistent state of an active obstacle-avoidance maneuver. Lives in the
-// planner library (not the ROS node) so the maneuver lifecycle and its ghost
-// memory can be operated on and unit-tested without any ROS dependency. The
-// decision-maker node owns the instance; the pure operations live alongside this
-// type in the planner library.
+// planner library (not the ROS node) so the maneuver lifecycle can be operated
+// on and unit-tested without any ROS dependency. The decision-maker node owns
+// the instance; the pure operations live alongside this type in the planner
+// library.
 struct ActiveAvoidanceState
 {
   bool active = false;
@@ -52,15 +52,14 @@ struct ActiveAvoidanceState
 
   ObstacleAvoidanceManeuver maneuver;
 
-  // Geometry/time memory for obstacles that may disappear from perception while
-  // ego is still passing them or while they conflict with the active route.
-  std::vector<ObstacleGhostEnvelope> ghost_memory;
-
-  // Memory of the obstacle behind a stop/wait decision that did not start a
-  // shift maneuver (StopBeforeObstacle / WaitForOncoming). Bridges short
-  // perception dropouts so ego does not oscillate between stopping and
-  // resuming while approaching the obstacle.
-  std::optional<ObstacleGhostEnvelope> stop_hold;
+  // Commit latch. Set once ego has physically begun the lateral shift
+  // (ego_s_modified >= shift_start_s). From then on the maneuver is driven to its
+  // release point and a disappearing obstacle no longer snaps ego back to the
+  // original line; the vehicle detects present objects directly, so a lost
+  // detection mid-shift is bridged by finishing the committed maneuver rather
+  // than by any obstacle memory. Sticky: only reset() clears it, so a dynamic
+  // replan that moves shift_start_s cannot un-commit an in-progress maneuver.
+  bool committed = false;
 
   // Oncoming-wait latch. Once the opposite-lane monitor decides to stop for an
   // oncoming participant, hold that stop until the participant has cleared the
@@ -110,8 +109,7 @@ struct ActiveAvoidanceState
     in_lane = false;
 
     maneuver = ObstacleAvoidanceManeuver{};
-    ghost_memory.clear();
-    stop_hold.reset();
+    committed = false;
 
     clear_oncoming_wait();
 

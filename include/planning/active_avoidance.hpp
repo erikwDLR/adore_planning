@@ -22,54 +22,17 @@ namespace adore
 namespace planner
 {
 
-// Operations on the obstacle-avoidance maneuver state and its ghost memory.
-// These are pure (no ROS) so the maneuver lifecycle can be unit-tested; the
-// decision-maker node owns the ActiveAvoidanceState instance and calls these.
+// Operations on the obstacle-avoidance maneuver state. These are pure (no ROS)
+// so the maneuver lifecycle can be unit-tested; the decision-maker node owns the
+// ActiveAvoidanceState instance and calls these.
 
-// Build a hold-able ghost envelope for an original avoidance obstacle by
-// projecting the participant footprint onto the route. Returns nullopt if no
-// footprint corner projects onto the route.
-std::optional<ObstacleGhostEnvelope>
-make_original_obstacle_envelope_from_participant(
-  const map::Route& route,
-  const dynamics::TrafficParticipant& participant,
-  double now,
-  const ObstacleAvoidanceParams& params );
-
-// Age, match, refresh and release the ghost memory against this cycle's
-// route-corridor safety result.
-void
-update_obstacle_ghost_memory(
-  ActiveAvoidanceState& state,
-  const RouteCorridorCheckResult& safety,
-  double ego_s,
-  double now,
-  const ObstacleAvoidanceParams& params );
-
-// Initialise the active maneuver state from a planned avoidance result. When
-// ghost memory is enabled, seed it from the original obstacles (optionally
-// preserving existing memory across a dynamic replan); otherwise leave it empty.
+// Initialise the active maneuver state from a planned avoidance result. Leaves
+// the commit latch untouched so an in-progress shift stays committed across a
+// dynamic replan.
 void
 start_active_avoidance_state(
   ActiveAvoidanceState& state,
-  const ObstacleAvoidanceResult& oa_result,
-  const map::Route& original_route,
-  const dynamics::TrafficParticipantSet& traffic_participants,
-  const dynamics::VehicleStateDynamic& ego,
-  const ObstacleAvoidanceParams& params,
-  bool preserve_existing_ghost_memory = false );
-
-// Most relevant (nearest, unpassed) ghosted conflict to stop for, or nullopt.
-std::optional<RouteCorridorConflict>
-most_relevant_ghost_conflict(
-  const ActiveAvoidanceState& state,
-  double ego_s );
-
-// An original avoidance obstacle that ego has not yet passed, or nullopt.
-std::optional<ObstacleGhostEnvelope>
-find_unpassed_original_ghost(
-  const ActiveAvoidanceState& state,
-  double ego_s );
+  const ObstacleAvoidanceResult& oa_result );
 
 // Monotonic-progression plausibility for the ego projection onto the active
 // modified route. Enforces no-backward motion and rejects implausible forward

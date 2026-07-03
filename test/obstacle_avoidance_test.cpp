@@ -295,68 +295,12 @@ TEST( ObstacleAvoidance, ShiftSpansObstacleAndIsSymmetricWithEqualClearances )
   EXPECT_NEAR( offset_at( centre - 6.5 ), offset_at( centre + 6.5 ), 1e-9 );
 }
 
-TEST( ObstacleAvoidance, DisabledGhostMemoryClearsExistingEnvelopes )
+TEST( ObstacleAvoidance, CommitLatchCanBeSetAndReset )
 {
   adore::planner::ActiveAvoidanceState state;
-  state.ghost_memory.emplace_back();
+  EXPECT_FALSE( state.committed );
 
-  adore::planner::RouteCorridorCheckResult safety;
-  auto params = test_params();
-  params.ghost_memory_enabled = false;
-
-  adore::planner::update_obstacle_ghost_memory(
-    state, safety, 0.0, 1.0, params );
-
-  EXPECT_TRUE( state.ghost_memory.empty() );
-}
-
-TEST( ObstacleAvoidance, DisabledGhostMemoryIsNotPreservedAcrossReplan )
-{
-  adore::planner::ActiveAvoidanceState state;
-  state.ghost_memory.emplace_back();
-
-  adore::planner::ObstacleAvoidanceResult result;
-  adore::map::Route route;
-  adore::dynamics::TrafficParticipantSet traffic_participants;
-  adore::dynamics::VehicleStateDynamic ego;
-  auto params = test_params();
-  params.ghost_memory_enabled = false;
-
-  adore::planner::start_active_avoidance_state(
-    state,
-    result,
-    route,
-    traffic_participants,
-    ego,
-    params,
-    true );
-
-  EXPECT_TRUE( state.active );
-  EXPECT_TRUE( state.ghost_memory.empty() );
-}
-
-TEST( ObstacleAvoidance, OriginalGhostExpiresAtMaximumLifetime )
-{
-  adore::planner::ActiveAvoidanceState state;
-  adore::planner::ObstacleGhostEnvelope original_ghost;
-  original_ghost.created_from_original_avoidance_obstacle = true;
-  original_ghost.hold_until_passed = true;
-  original_ghost.hold_until_s = 100.0;
-  original_ghost.first_seen_time = 0.0;
-  original_ghost.last_seen_time = 0.0;
-  state.ghost_memory.push_back( original_ghost );
-
-  adore::planner::RouteCorridorCheckResult safety;
-  auto params = test_params();
-  params.ghost_memory_enabled = true;
-  params.ghost_obstacle_hold_time = 2.0;
-  params.ghost_obstacle_max_lifetime = 10.0;
-
-  adore::planner::update_obstacle_ghost_memory(
-    state, safety, 0.0, 9.9, params );
-  ASSERT_EQ( state.ghost_memory.size(), 1U );
-
-  adore::planner::update_obstacle_ghost_memory(
-    state, safety, 0.0, 10.0, params );
-  EXPECT_TRUE( state.ghost_memory.empty() );
+  state.committed = true;
+  state.reset();
+  EXPECT_FALSE( state.committed );
 }

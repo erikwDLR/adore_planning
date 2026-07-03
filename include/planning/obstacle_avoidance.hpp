@@ -219,19 +219,6 @@ struct ObstacleAvoidanceParams
   double modified_route_braking_safety_margin = 5.0;
   double min_valid_stop_margin = 1.0;
 
-  // Ghost memory for obstacles that were relevant during an active avoidance state.
-  // Master switch: when false no disappeared obstacle or participant is
-  // remembered by ghost memory, stop-hold, or oncoming-wait dropout bridging.
-  bool ghost_memory_enabled = true;
-  double ghost_obstacle_hold_time = 2.0;
-  double ghost_obstacle_release_extra_s = 5.0;
-  double ghost_obstacle_match_s_margin = 3.0;
-  double ghost_obstacle_match_l_margin = 1.0;
-  // Hard upper bound for every ghost, including the obstacle that created the
-  // active maneuver. Release by ego progress may end the hold earlier.
-  double ghost_obstacle_max_lifetime = 10.0;
-  int ghost_dynamic_max_missing_cycles = 5;
-
   // ============================================================================
   // Internal/advanced trajectory and geometry parameters.
   // ============================================================================
@@ -466,40 +453,6 @@ struct RouteCorridorCheckResult
   // only the best one, so simultaneously visible obstacles do not age out.
   std::vector<RouteCorridorConflict> conflicts;
   std::string reason;
-};
-
-struct ObstacleGhostEnvelope
-{
-  double object_s_min = std::numeric_limits<double>::infinity();
-  double object_s_max = -std::numeric_limits<double>::infinity();
-  double object_l_min = std::numeric_limits<double>::infinity();
-  double object_l_max = -std::numeric_limits<double>::infinity();
-
-  double inflated_s_min = std::numeric_limits<double>::infinity();
-  double inflated_s_max = -std::numeric_limits<double>::infinity();
-  double inflated_l_min = std::numeric_limits<double>::infinity();
-  double inflated_l_max = -std::numeric_limits<double>::infinity();
-
-  RouteCorridorObjectClass object_class = RouteCorridorObjectClass::CrossingOrUnknown;
-
-  double first_seen_time = std::numeric_limits<double>::quiet_NaN();
-  double last_seen_time = std::numeric_limits<double>::quiet_NaN();
-  int seen_count = 0;
-  double hold_until_s = std::numeric_limits<double>::infinity();
-  int consecutive_missing_cycles = 0;
-  bool hold_until_passed = false;
-  bool created_from_original_avoidance_obstacle = false;
-  bool is_ghost = false;
-  int last_participant_id = -1;
-
-  double object_center_x = std::numeric_limits<double>::quiet_NaN();
-  double object_center_y = std::numeric_limits<double>::quiet_NaN();
-  double object_yaw = 0.0;
-  double object_length = 0.1;
-  double object_width = 0.1;
-  std::array<double, 4> footprint_x{};
-  std::array<double, 4> footprint_y{};
-  bool has_world_footprint = false;
 };
 
 struct ObstacleAvoidanceManeuver

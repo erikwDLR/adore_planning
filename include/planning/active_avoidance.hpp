@@ -34,6 +34,25 @@ start_active_avoidance_state(
   ActiveAvoidanceState& state,
   const ObstacleAvoidanceResult& oa_result );
 
+// Latch the maximum object-local dimensions seen for each maneuver obstacle.
+// Fed directly from perception each cycle because the active-route conflict
+// check deliberately ignores the maneuver's own obstacles and so never observes
+// their growth. Only currently visible maneuver obstacles are (re)touched;
+// existing entries are never shrunk or decayed and persist until reset(). Lets a
+// later replan react to an obstacle that turns out larger than first perceived
+// without thrashing on frame-to-frame size flicker.
+void
+update_tracked_obstacle_envelopes(
+  ActiveAvoidanceState& state,
+  const dynamics::TrafficParticipantSet& traffic_participants,
+  const ObstacleAvoidanceParams& params );
+
+// Max dimensions latched for a given participant id, or nullopt if none tracked.
+std::optional<TrackedObstacleEnvelope>
+tracked_obstacle_for(
+  const ActiveAvoidanceState& state,
+  int participant_id );
+
 // Monotonic-progression plausibility for the ego projection onto the active
 // modified route. Enforces no-backward motion and rejects implausible forward
 // jumps (projection artifacts, e.g. matches at the search-window edge) by

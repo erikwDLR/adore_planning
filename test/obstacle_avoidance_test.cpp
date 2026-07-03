@@ -304,3 +304,73 @@ TEST( ObstacleAvoidance, CommitLatchCanBeSetAndReset )
   state.reset();
   EXPECT_FALSE( state.committed );
 }
+
+namespace
+{
+adore::dynamics::TrafficParticipantSet
+make_participant_set( int id, double length, double width )
+{
+  adore::dynamics::TrafficParticipant participant;
+  participant.id = id;
+  participant.physical_parameters.body_length = length;
+  participant.physical_parameters.body_width = width;
+
+  adore::dynamics::TrafficParticipantSet set;
+  set.participants[id] = participant;
+  return set;
+}
+} // namespace
+
+TEST( ObstacleAvoidance, TrackedObstacleEnvelopeLatchesMaximumDimensions )
+{
+  adore::planner::ActiveAvoidanceState state;
+  state.obstacle_ids = { 7 };
+  auto params = test_params();
+
+  // First perceived small, then larger, then reported small again.
+  adore::planner::update_tracked_obstacle_envelopes(
+    state, make_participant_set( 7, 3.0, 1.5 ), params );
+  adore::planner::update_tracked_obstacle_envelopes(
+    state, make_participant_set( 7, 5.0, 2.0 ), params );
+  adore::planner::update_tracked_obstacle_envelopes(
+    state, make_participant_set( 7, 3.0, 1.5 ), params );
+
+  const auto tracked = adore::planner::tracked_obstacle_for( state, 7 );
+  ASSERT_TRUE( tracked.has_value() );
+  EXPECT_DOUBLE_EQ( tracked->max_length, 5.0 );
+  EXPECT_DOUBLE_EQ( tracked->max_width, 2.0 );
+}
+
+TEST( ObstacleAvoidance, TrackedObstacleEnvelopeHeldWhenParticipantMissing )
+{
+  adore::planner::ActiveAvoidanceState state;
+  state.obstacle_ids = { 7 };
+  auto params = test_params();
+
+  adore::planner::update_tracked_obstacle_envelopes(
+    state, make_participant_set( 7, 5.0, 2.0 ), params );
+
+  // Participant not visible this cycle: latched maximum must not shrink.
+  adore::dynamics::TrafficParticipantSet empty;
+  adore::planner::update_tracked_obstacle_envelopes( state, empty, params );
+
+  const auto tracked = adore::planner::tracked_obstacle_for( state, 7 );
+  ASSERT_TRUE( tracked.has_value() );
+  EXPECT_DOUBLE_EQ( tracked->max_length, 5.0 );
+  EXPECT_DOUBLE_EQ( tracked->max_width, 2.0 );
+}
+
+TEST( ObstacleAvoidance, ResetClearsTrackedObstacles )
+{
+  adore::planner::ActiveAvoidanceState state;
+  state.obstacle_ids = { 7 };
+  auto params = test_params();
+
+  adore::planner::update_tracked_obstacle_envelopes(
+    state, make_participant_set( 7, 5.0, 2.0 ), params );
+  ASSERT_TRUE( adore::planner::tracked_obstacle_for( state, 7 ).has_value() );
+
+  state.reset();
+  EXPECT_FALSE( adore::planner::tracked_obstacle_for( state, 7 ).has_value() );
+  EXPECT_TRUE( state.tracked_obstacles.empty() );
+}

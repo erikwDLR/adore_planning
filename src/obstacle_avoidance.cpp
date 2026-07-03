@@ -557,8 +557,10 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       std::snprintf(
         buf,
         sizeof( buf ),
-        "%s (shift=%.2f, front_clearance=%.2f, rear_clearance=%.2f)",
+        "%s (type=%d in_lane=%d shift=%.2f, front_clearance=%.2f, rear_clearance=%.2f)",
         reason.c_str(),
+        static_cast<int>( candidate.shift_candidate.type ),
+        static_cast<int>( candidate.shift_candidate.in_lane ),
         candidate.shift_candidate.shift,
         candidate.params.front_clearance,
         candidate.params.rear_clearance );
@@ -826,29 +828,36 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     std::string reason =
       "driving mission (stop before obstacle: no validated route-shift candidate)";
 
-    if( !last_validation_rejection.empty() )
+    // Diagnostic: surface the group composition and EVERY rejection category (not
+    // just the first) so a late-appearing second obstacle can be told apart:
+    // uniform merged-group shift capped by drivable-area vs a separate in-lane
+    // candidate failing at the own-lane boundary. type: 0=InLane 1=Adjacent
+    // 2=Opposite (AvoidanceCandidateType order).
     {
-      reason += ": " + last_validation_rejection;
-    }
-    else if( !last_planning_rejection.empty() )
-    {
-      reason += ": " + last_planning_rejection;
-    }
-    else if( !last_projection_rejection.empty() )
-    {
-      reason += ": " + last_projection_rejection;
-    }
-    else if( !last_drivable_area_rejection.empty() )
-    {
-      reason += ": " + last_drivable_area_rejection;
-    }
-    else if( !last_safety_rejection.empty() )
-    {
-      reason += ": " + last_safety_rejection;
-    }
-    else if( !last_oncoming_rejection.empty() )
-    {
-      reason += ": " + last_oncoming_rejection;
+      const auto& diag_group = obstacle_group.value();
+      char group_buf[320];
+      std::snprintf(
+        group_buf, sizeof( group_buf ),
+        " group{n=%zu hard_merged=%d hull_curve=%d s=[%.1f,%.1f] l=[%.2f,%.2f]}",
+        diag_group.obstacles.size(),
+        static_cast<int>( diag_group.hard_merged ),
+        static_cast<int>( diag_group.uses_hull_curve ),
+        diag_group.envelope.object_s_min, diag_group.envelope.object_s_max,
+        diag_group.envelope.object_l_min, diag_group.envelope.object_l_max );
+      reason += group_buf;
+
+      if( !last_drivable_area_rejection.empty() )
+        reason += " | DRIVABLE: " + last_drivable_area_rejection;
+      if( !last_validation_rejection.empty() )
+        reason += " | VALIDATION: " + last_validation_rejection;
+      if( !last_safety_rejection.empty() )
+        reason += " | SAFETY: " + last_safety_rejection;
+      if( !last_oncoming_rejection.empty() )
+        reason += " | ONCOMING: " + last_oncoming_rejection;
+      if( !last_projection_rejection.empty() )
+        reason += " | PROJECTION: " + last_projection_rejection;
+      if( !last_planning_rejection.empty() )
+        reason += " | PLANNING: " + last_planning_rejection;
     }
 
     return plan_stop_before_obstacle(

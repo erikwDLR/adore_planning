@@ -116,44 +116,6 @@ choose_larger_magnitude_shift( double a, double b )
 }
 
 double
-hard_bridge_alpha_at_s( double s,
-                        const ObstacleEnvelope& previous,
-                        const ObstacleEnvelope& next,
-                        const ObstacleAvoidanceParams& params )
-{
-  // Clearance-based cluster bounds (see avoidance_shift_alpha_at_s): ramp up over
-  // front_clearance before the first obstacle, hold across the cluster, ramp down
-  // over rear_clearance after the last obstacle. No implicit ego offset.
-  const double bridge_start_s =
-    std::max(
-      0.0,
-      previous.object_s_min - std::max( 0.0, params.front_clearance ) );
-  const double bridge_end_s =
-    next.object_s_max + std::max( 0.0, params.rear_clearance );
-
-  if( s < bridge_start_s || s > bridge_end_s )
-  {
-    return 0.0;
-  }
-
-  if( s < previous.object_s_min )
-  {
-    return smoothstep01(
-      ( s - bridge_start_s ) /
-      std::max( 0.1, previous.object_s_min - bridge_start_s ) );
-  }
-
-  if( s > next.object_s_max )
-  {
-    return 1.0 - smoothstep01(
-      ( s - next.object_s_max ) /
-      std::max( 0.1, bridge_end_s - next.object_s_max ) );
-  }
-
-  return 1.0;
-}
-
-double
 avoidance_shift_offset_at_s(
   double s,
   const AvoidanceGroup& group,
@@ -161,6 +123,12 @@ avoidance_shift_offset_at_s(
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params )
 {
+  // Per-obstacle shift: each obstacle contributes its OWN required shift over its
+  // OWN clearance ramp (ramp up over front_clearance, hold alongside, ramp down
+  // over rear_clearance), composed by taking the max-magnitude at each s. So ego
+  // only ever holds as much shift as the nearest obstacle needs and returns
+  // toward its lane as soon as a smaller-shift obstacle takes over - whether the
+  // leading or the trailing obstacle sits further at the edge.
   double offset = 0.0;
 
   for( const auto& obstacle : group.obstacles )
@@ -181,100 +149,51 @@ avoidance_shift_offset_at_s(
     offset = choose_larger_magnitude_shift( offset, required_shift * alpha );
   }
 
-  if( ( group.uses_hull_curve || group.hard_merged ) &&
-      group.obstacles.size() >= 2 )
+  // Smooth the transition between consecutive obstacles. The max-of-ramps above
+  // dips and kinks (a sharp V) where one obstacle's rear ramp crosses the next
+  // obstacle's front ramp. Where the two are close enough that their ramps
+  // overlap, bridge the physical gap [prev rear, next front] with a smoothstep
+  // from the previous to the next obstacle's own shift. Both plateaus are flat
+  // (slope 0), so the bridge hands off C1-smoothly: for equal shifts it is flat
+  // (no dip), for unequal a smooth ramp toward the smaller shift instead of a
+  // corner. It only ever raises the offset inside the gap, so it never reduces
+  // clearance to either obstacle.
+  const double ramp_reach =
+    std::max( 0.0, params.front_clearance ) +
+    std::max( 0.0, params.rear_clearance );
+
+  for( std::size_t i = 1; i < group.obstacles.size(); ++i )
   {
-    const double hard_merge_gap_s =
-      std::max( 0.0, params.cluster_hold_gap_s );
-    const double shift_hull_gap_s =
-      std::max( hard_merge_gap_s, params.shift_hull_gap_s );
+    const auto& prev = group.obstacles[i - 1];
+    const auto& next = group.obstacles[i];
 
-    for( std::size_t i = 1; i < group.obstacles.size(); ++i )
+    const double gap_start = prev.object_s_max;
+    const double gap_end = next.object_s_min;
+
+    // Only bridge a real gap whose per-object ramps actually overlap; for
+    // far-apart obstacles the profile genuinely returns toward the lane between
+    // them (smoothstep already reaches zero, so no kink there).
+    if( gap_end <= gap_start || gap_end - gap_start >= ramp_reach )
     {
-      const auto& previous = group.obstacles[i - 1];
-      const auto& next = group.obstacles[i];
-
-      const double raw_gap_s = next.object_s_min - previous.object_s_max;
-      if( raw_gap_s > shift_hull_gap_s )
-      {
-        continue;
-      }
-
-      const double previous_shift =
-        required_signed_shift_for_obstacle(
-          previous,
-          nominal_lateral_shift,
-          ego_params,
-          params );
-      const double next_shift =
-        required_signed_shift_for_obstacle(
-          next,
-          nominal_lateral_shift,
-          ego_params,
-          params );
-
-      if( raw_gap_s <= hard_merge_gap_s )
-      {
-        const double bridge_alpha =
-          hard_bridge_alpha_at_s( s, previous, next, params );
-        if( bridge_alpha <= 0.0 )
-        {
-          continue;
-        }
-
-        // Hard clusters keep the larger required per-object shift through the
-        // bridge. If the next object needs more shift, ego is already in place;
-        // if it needs less, ego avoids an unnecessary return steering input.
-        const double bridge_offset =
-          choose_larger_magnitude_shift( previous_shift, next_shift ) *
-          bridge_alpha;
-        offset = choose_larger_magnitude_shift( offset, bridge_offset );
-        continue;
-      }
-
-      // Span the bridge over the full physical gap between the obstacles. The
-      // endpoints then coincide with the full per-obstacle shift plateaus
-      // (alpha=1, shift=prev/next) at object_s_max / object_s_min, so the
-      // bridge hands off to them seamlessly (C1). Insetting by ego geometry
-      // moved the endpoints into the per-obstacle ramp-down/ramp-up regions,
-      // where the max() source switches and creates a slope kink -> a curvature
-      // spike that is barely visible on a straight but obvious through a curve.
-      const double bridge_start_s = previous.object_s_max;
-      const double bridge_end_s = next.object_s_min;
-
-      if( s < bridge_start_s || s > bridge_end_s ||
-          bridge_end_s <= bridge_start_s + 0.1 )
-      {
-        continue;
-      }
-
-      const double t =
-        std::clamp(
-          ( s - bridge_start_s ) / ( bridge_end_s - bridge_start_s ),
-          0.0,
-          1.0 );
-      const double bridge_floor =
-        std::clamp( params.min_alpha_between_hull_obstacles, 0.0, 1.0 );
-      double bridge_alpha = 1.0;
-
-      if( t <= 0.5 )
-      {
-        bridge_alpha =
-          1.0 - ( 1.0 - bridge_floor ) * smoothstep01( 2.0 * t );
-      }
-      else
-      {
-        bridge_alpha =
-          bridge_floor +
-          ( 1.0 - bridge_floor ) * smoothstep01( 2.0 * t - 1.0 );
-      }
-
-      const double bridge_shift =
-        previous_shift +
-        ( next_shift - previous_shift ) * smoothstep01( t );
-      const double bridge_offset = bridge_shift * bridge_alpha;
-      offset = choose_larger_magnitude_shift( offset, bridge_offset );
+      continue;
     }
+    if( s < gap_start || s > gap_end )
+    {
+      continue;
+    }
+
+    const double prev_shift =
+      required_signed_shift_for_obstacle(
+        prev, nominal_lateral_shift, ego_params, params );
+    const double next_shift =
+      required_signed_shift_for_obstacle(
+        next, nominal_lateral_shift, ego_params, params );
+
+    const double t = ( s - gap_start ) / ( gap_end - gap_start );
+    const double bridge_shift =
+      prev_shift + ( next_shift - prev_shift ) * smoothstep01( t );
+
+    offset = choose_larger_magnitude_shift( offset, bridge_shift );
   }
 
   return offset;

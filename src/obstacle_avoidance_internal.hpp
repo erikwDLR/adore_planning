@@ -249,12 +249,6 @@ double
 choose_larger_magnitude_shift( double a, double b );
 
 double
-hard_bridge_alpha_at_s( double s,
-                        const ObstacleEnvelope& previous,
-                        const ObstacleEnvelope& next,
-                        const ObstacleAvoidanceParams& params );
-
-double
 avoidance_shift_offset_at_s(
   double s,
   const AvoidanceGroup& group,
@@ -522,7 +516,8 @@ validate_planned_shift_trajectory(
   AvoidanceCandidateType candidate_type,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params,
-  double initial_s_hint );
+  double initial_s_hint,
+  const std::vector<int>* skip_clearance_obstacle_ids = nullptr );
 
 double
 score_route_shift_candidate( const RouteShiftPlanCandidate& candidate,

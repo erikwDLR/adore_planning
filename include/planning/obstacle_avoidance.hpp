@@ -57,6 +57,15 @@ struct ObstacleAvoidanceParams
   double rear_clearance               = 7.0;
   double stop_before_obstacle         = 8.0;
 
+  // Shorter front-clearance ramp used when REPLANNING mid-maneuver for a newly
+  // appearing obstacle. A late obstacle can leave ego closer than front_clearance
+  // to it, so the full 7 m entry ramp no longer fits the remaining distance and
+  // the replan fails even though there is physical room. The reduced ramp fits
+  // (ego is typically slow / braking by then, so the steeper shift is drivable).
+  // The initial maneuver entry (first obstacle) still uses full front_clearance
+  // and the exit (last obstacle) still uses rear_clearance.
+  double min_front_clearance          = 3.0;
+
   // Allow lateral shifts within the current lane (without changing lanes).
   bool in_lane_shift_enabled = true;
 
@@ -141,11 +150,6 @@ struct ObstacleAvoidanceParams
   //   treat the obstacles as separate maneuvers.
   double cluster_hold_gap_s = 10.0;
   double shift_hull_gap_s = 20.0;
-
-  // Minimum shift fraction between hull-linked obstacles.
-  // 0.0 = allow full return, 1.0 = keep full shift. 0.5 makes the hull visible
-  // and avoids returning completely before the next obstacle.
-  double min_alpha_between_hull_obstacles = 0.5;
 
   // Internal switch for evaluating extra lateral shift variants.
   bool enable_multi_candidate_route_shift = true;
@@ -658,7 +662,8 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                              const dynamics::VehicleStateDynamic& ego,
                              const dynamics::TrafficParticipantSet& traffic_participants,
                              const ObstacleAvoidanceParams& params = {},
-                             const std::vector<int>* additional_ignored_participant_ids = nullptr );
+                             const std::vector<int>* additional_ignored_participant_ids = nullptr,
+                             const std::vector<int>* committed_obstacle_ids = nullptr );
 
 } // namespace planner
 } // namespace adore

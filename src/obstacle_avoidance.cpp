@@ -334,7 +334,8 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                              const dynamics::VehicleStateDynamic& ego,
                              const dynamics::TrafficParticipantSet& traffic_participants,
                              const ObstacleAvoidanceParams& params,
-                             const std::vector<int>* additional_ignored_participant_ids )
+                             const std::vector<int>* additional_ignored_participant_ids,
+                             const std::vector<int>* committed_obstacle_ids )
 {
   ObstacleAvoidanceResult result;
   result.modified_route = route;
@@ -737,7 +738,8 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           candidate.shift_candidate.type,
           vehicle_params,
           candidate.params,
-          ego_s_original );
+          ego_s_original,
+          committed_obstacle_ids );
 
       if( !candidate.validation.valid )
       {
@@ -925,7 +927,8 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       selected.shift_candidate.type,
       vehicle_params,
       selected.params,
-      ego_s_original );
+      ego_s_original,
+      committed_obstacle_ids );
 
   if( !final_validation.valid )
   {

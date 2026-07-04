@@ -12,6 +12,7 @@
 #include "obstacle_avoidance_internal.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -252,6 +253,71 @@ candidate_respects_opposite_direction_area(
   return true;
 }
 
+bool
+modified_route_clears_group_obstacles(
+  const AvoidanceGroup& group,
+  double lateral_shift,
+  const dynamics::PhysicalVehicleParameters& ego_params,
+  const ObstacleAvoidanceParams& params )
+{
+  // Separate, route-geometry check that the modified route actually clears
+  // EVERY obstacle in the group. This is deliberately independent of
+  // validate_planned_shift_trajectory, which only walks the finite planned
+  // trajectory horizon: an obstacle further downstream than the trajectory
+  // currently reaches is never longitudinally overlapped there and so is never
+  // clearance-checked, even though the shifted route runs right through it.
+  // The gap is widened by required_signed_shift_for_obstacle clamping each
+  // obstacle's need to the (leader-sized) single candidate shift, so a trailing
+  // obstacle sitting in the shifted path reports a "full" shift that does not
+  // clear it. Here we sample each obstacle's own longitudinal extent, evaluate
+  // the shift profile there, and require the ego footprint to clear it by the
+  // configured side clearance - mirroring the obstacle-clearance math in
+  // validate_planned_shift_trajectory but over the route, not the trajectory.
+  const double ego_half_width =
+    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
+  const double required_clearance = std::max( 0.0, params.side_clearance );
+  // Match validate_planned_shift_trajectory's tolerance for the route round-trip
+  // numerical noise so the two checks agree at the margin.
+  constexpr double geometry_validation_tolerance = 0.02;
+  constexpr int obstacle_samples = 5;
+
+  for( const auto& obstacle : group.obstacles )
+  {
+    const double s_min = obstacle.object_s_min;
+    const double s_max = obstacle.object_s_max;
+    const double span = std::max( 0.0, s_max - s_min );
+
+    for( int k = 0; k <= obstacle_samples; ++k )
+    {
+      const double s =
+        s_min + span * ( static_cast<double>( k ) /
+                         static_cast<double>( obstacle_samples ) );
+      const double center_l =
+        avoidance_shift_offset_at_s(
+          s,
+          group,
+          lateral_shift,
+          ego_params,
+          params );
+
+      const double ego_min_l = center_l - ego_half_width;
+      const double ego_max_l = center_l + ego_half_width;
+
+      const double left_clearance = ego_min_l - obstacle.object_l_max;
+      const double right_clearance = obstacle.object_l_min - ego_max_l;
+      const double actual_clearance =
+        std::max( left_clearance, right_clearance );
+
+      if( actual_clearance - required_clearance < -geometry_validation_tolerance )
+      {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 void
 evaluate_shift_candidate( ShiftCandidate& candidate,
                           const map::Route& route,
@@ -261,6 +327,21 @@ evaluate_shift_candidate( ShiftCandidate& candidate,
 {
   if( !candidate.valid )
   {
+    return;
+  }
+
+  // Independent of the drivable-area handling below (and of the finite-horizon
+  // trajectory validation), the modified route must clear every obstacle in the
+  // group. Without this a downstream obstacle sitting in the shifted path - its
+  // true required shift clamped to the leader-sized candidate shift - would be
+  // accepted at plan time and only stop the ego at runtime.
+  if( !modified_route_clears_group_obstacles(
+        group,
+        candidate.shift,
+        ego_params,
+        params ) )
+  {
+    candidate.valid = false;
     return;
   }
 
@@ -590,7 +671,8 @@ validate_planned_shift_trajectory(
   AvoidanceCandidateType candidate_type,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params,
-  double initial_s_hint )
+  double initial_s_hint,
+  const std::vector<int>* skip_clearance_obstacle_ids )
 {
   TrajectoryValidationResult result;
   result.reason = "trajectory valid";
@@ -620,6 +702,36 @@ validate_planned_shift_trajectory(
   // construction exact, but do not reject that route for numerical noise.
   constexpr double geometry_validation_tolerance = 0.02;
   double previous_s = initial_s_hint;
+
+  // Diagnostic: the first trajectory state is ego's ACTUAL current pose. Capture
+  // its route s/l and the shift the modified route wants there, so a clearance
+  // failure reveals whether ego started already on the committed (obj1) shift or
+  // below it - i.e. whether the replan has to re-develop the turn-in from an
+  // under-shifted pose (the late second-obstacle case).
+  double traj_start_s = std::numeric_limits<double>::quiet_NaN();
+  double traj_start_l = std::numeric_limits<double>::quiet_NaN();
+  double traj_start_route_off = std::numeric_limits<double>::quiet_NaN();
+  if( !trajectory.states.empty() )
+  {
+    const auto& first_state = trajectory.states.front();
+    double first_s = adore::map::get_s_on_reference_line_segments(
+      route, first_state,
+      std::isfinite( initial_s_hint ) ? initial_s_hint : group.envelope.center_s,
+      30.0 );
+    if( !std::isfinite( first_s ) )
+    {
+      first_s = project_s_on_reference_line( route, first_state, initial_s_hint );
+    }
+    if( std::isfinite( first_s ) )
+    {
+      const auto first_frame = make_route_frame( route, first_s );
+      traj_start_s = first_s;
+      traj_start_l =
+        signed_lateral_offset( first_frame, math::Point2d{ first_state.x, first_state.y } );
+      traj_start_route_off =
+        avoidance_shift_offset_at_s( first_s, group, lateral_shift, ego_params, params );
+    }
+  }
 
   for( const auto& state : trajectory.states )
   {
@@ -768,46 +880,187 @@ validate_planned_shift_trajectory(
       return result;
     }
 
-    const double ego_s_min = state_s - ego_rear_offset;
-    const double ego_s_max = state_s + ego_front_offset;
-    const double ego_min_l = state_l - ego_half_width;
-    const double ego_max_l = state_l + ego_half_width;
+    // Footprint-accurate ego geometry. The vehicle reference (state.x, state.y)
+    // is the rear axle; project the four actual body corners onto the route so
+    // the heading is respected. Extruding a single axis-aligned box at the
+    // rear-axle lateral over the whole body length ignores that, while turning
+    // into the shift, the body-fixed corners project to different lateral
+    // offsets: the leading corner has already swung clear (avoiding a false
+    // rejection), while the trailing corner may swing out (catching a real tail
+    // overhang the centered box missed). Obstacles keep their route-frame
+    // bounding box (already a conservative envelope), so only the ego side is
+    // refined here.
+    const double cos_yaw = std::cos( state.yaw_angle );
+    const double sin_yaw = std::sin( state.yaw_angle );
+
+    // Body-frame corner offsets (longitudinal from rear axle, lateral) in
+    // polygon boundary order: front-left, front-right, rear-right, rear-left.
+    const std::array<double, 4> body_long_offset = {
+      ego_front_offset, ego_front_offset, -ego_rear_offset, -ego_rear_offset };
+    const std::array<double, 4> body_lat_offset = {
+      ego_half_width, -ego_half_width, -ego_half_width, ego_half_width };
+
+    std::array<double, 4> corner_s{};
+    std::array<double, 4> corner_l{};
+    double ego_s_lo = std::numeric_limits<double>::infinity();
+    double ego_s_hi = -std::numeric_limits<double>::infinity();
+    bool corner_projection_ok = true;
+
+    for( std::size_t c = 0; c < 4; ++c )
+    {
+      const math::Point2d corner_xy{
+        state.x + cos_yaw * body_long_offset[c] - sin_yaw * body_lat_offset[c],
+        state.y + sin_yaw * body_long_offset[c] + cos_yaw * body_lat_offset[c] };
+
+      double corner_s_value =
+        adore::map::get_s_on_reference_line_segments(
+          route, corner_xy, state_s, 30.0 );
+      if( !std::isfinite( corner_s_value ) )
+      {
+        corner_s_value = project_s_on_reference_line( route, corner_xy, state_s );
+      }
+      if( !std::isfinite( corner_s_value ) )
+      {
+        corner_projection_ok = false;
+        break;
+      }
+
+      const auto corner_frame = make_route_frame( route, corner_s_value );
+      corner_s[c] = corner_s_value;
+      corner_l[c] = signed_lateral_offset( corner_frame, corner_xy );
+      ego_s_lo = std::min( ego_s_lo, corner_s[c] );
+      ego_s_hi = std::max( ego_s_hi, corner_s[c] );
+    }
+
+    // Lateral extent of the ego footprint restricted to a longitudinal band,
+    // from the projected quad (interior vertices + edge crossings at the band
+    // limits). Exact for a convex quad; the projection is near-affine over a
+    // vehicle length so convexity holds locally.
+    const auto ego_lateral_span_in_band =
+      [&]( double band_lo, double band_hi, double& span_min_l, double& span_max_l )
+    {
+      double lo_l = std::numeric_limits<double>::infinity();
+      double hi_l = -std::numeric_limits<double>::infinity();
+
+      for( std::size_t c = 0; c < 4; ++c )
+      {
+        if( corner_s[c] >= band_lo && corner_s[c] <= band_hi )
+        {
+          lo_l = std::min( lo_l, corner_l[c] );
+          hi_l = std::max( hi_l, corner_l[c] );
+        }
+      }
+
+      for( std::size_t c = 0; c < 4; ++c )
+      {
+        const std::size_t n = ( c + 1 ) % 4;
+        const double sa = corner_s[c];
+        const double sb = corner_s[n];
+        if( sa == sb )
+        {
+          continue;
+        }
+        for( const double bs : { band_lo, band_hi } )
+        {
+          const double t = ( bs - sa ) / ( sb - sa );
+          if( t >= 0.0 && t <= 1.0 )
+          {
+            const double l = corner_l[c] + t * ( corner_l[n] - corner_l[c] );
+            lo_l = std::min( lo_l, l );
+            hi_l = std::max( hi_l, l );
+          }
+        }
+      }
+
+      span_min_l = lo_l;
+      span_max_l = hi_l;
+      return lo_l <= hi_l;
+    };
 
     for( const auto& obstacle : group.obstacles )
     {
-      const bool longitudinal_overlap =
-        ego_s_max >= obstacle.object_s_min &&
-        ego_s_min <= obstacle.object_s_max;
-
-      if( longitudinal_overlap )
+      // Skip the trajectory clearance check for obstacles that belong to the
+      // already-committed maneuver ego is executing. During a replan for a NEW
+      // obstacle they are re-checked from ego's current, transiently lagging /
+      // angled turn-in pose, where the committed obstacle spuriously fails even
+      // though ego is passing it correctly. They stay in the group (so the route
+      // still shifts to clear them); only their re-validation is suppressed.
+      if( skip_clearance_obstacle_ids != nullptr &&
+          !obstacle.participant_ids.empty() &&
+          std::all_of(
+            obstacle.participant_ids.begin(),
+            obstacle.participant_ids.end(),
+            [&]( int id )
+            { return contains_participant_id( *skip_clearance_obstacle_ids, id ); } ) )
       {
-        const double left_clearance = ego_min_l - obstacle.object_l_max;
-        const double right_clearance = obstacle.object_l_min - ego_max_l;
-        const double actual_clearance =
-          std::max( left_clearance, right_clearance );
-        const double required_clearance =
-          std::max( 0.0, params.side_clearance );
-        const double obstacle_lateral_margin =
-          actual_clearance - required_clearance;
+        continue;
+      }
 
-        result.min_obstacle_lateral_margin =
-          std::min( result.min_obstacle_lateral_margin, obstacle_lateral_margin );
+      double ego_min_l;
+      double ego_max_l;
 
-        if( obstacle_lateral_margin < -geometry_validation_tolerance )
+      if( corner_projection_ok )
+      {
+        const double band_lo = std::max( ego_s_lo, obstacle.object_s_min );
+        const double band_hi = std::min( ego_s_hi, obstacle.object_s_max );
+        if( band_lo > band_hi )
         {
-
-          char buf[256];
-          std::snprintf(
-            buf,
-            sizeof( buf ),
-            "trajectory validation failed: insufficient obstacle side clearance at s=%.2f actual_clearance=%.2f required=%.2f",
-            state_s,
-            actual_clearance,
-            required_clearance );
-          result.valid = false;
-          result.reason = buf;
-          return result;
+          continue;  // no longitudinal overlap
         }
+        if( !ego_lateral_span_in_band( band_lo, band_hi, ego_min_l, ego_max_l ) )
+        {
+          continue;
+        }
+      }
+      else
+      {
+        // Projection glitch: fall back to the conservative rear-axle box so a
+        // clearance check is never silently skipped.
+        const double ego_s_min = state_s - ego_rear_offset;
+        const double ego_s_max = state_s + ego_front_offset;
+        if( ego_s_max < obstacle.object_s_min ||
+            ego_s_min > obstacle.object_s_max )
+        {
+          continue;
+        }
+        ego_min_l = state_l - ego_half_width;
+        ego_max_l = state_l + ego_half_width;
+      }
+
+      const double left_clearance = ego_min_l - obstacle.object_l_max;
+      const double right_clearance = obstacle.object_l_min - ego_max_l;
+      const double actual_clearance =
+        std::max( left_clearance, right_clearance );
+      const double required_clearance =
+        std::max( 0.0, params.side_clearance );
+      const double obstacle_lateral_margin =
+        actual_clearance - required_clearance;
+
+      result.min_obstacle_lateral_margin =
+        std::min( result.min_obstacle_lateral_margin, obstacle_lateral_margin );
+
+      if( obstacle_lateral_margin < -geometry_validation_tolerance )
+      {
+        char buf[448];
+        std::snprintf(
+          buf,
+          sizeof( buf ),
+          "trajectory validation failed: insufficient obstacle side clearance at s=%.2f actual_clearance=%.2f required=%.2f (planned_offset=%.2f traj_state_l=%.2f ego_l=[%.2f,%.2f] obstacle_l=[%.2f,%.2f]) ego_start=[s=%.1f l=%.2f route_off=%.2f]",
+          state_s,
+          actual_clearance,
+          required_clearance,
+          planned_offset,
+          state_l,
+          ego_min_l,
+          ego_max_l,
+          obstacle.object_l_min,
+          obstacle.object_l_max,
+          traj_start_s,
+          traj_start_l,
+          traj_start_route_off );
+        result.valid = false;
+        result.reason = buf;
+        return result;
       }
     }
   }

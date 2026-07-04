@@ -328,6 +328,42 @@ RouteStopPolicy::plan_stop_on_route(
   return plan;
 }
 
+double
+avoidance_ramp_length( double distance_to_obstacle,
+                       double ego_front_offset,
+                       const ObstacleAvoidanceParams& params )
+{
+  const double floor = std::max( 0.0, ego_front_offset );
+  const double cap = std::max( floor, std::max( 0.0, params.front_clearance ) );
+  const double distance = std::isfinite( distance_to_obstacle )
+                            ? distance_to_obstacle
+                            : cap;
+  return std::clamp( distance, floor, cap );
+}
+
+double
+avoidance_speed_for_shift( double ramp_length,
+                           double shift_magnitude,
+                           const ObstacleAvoidanceParams& params )
+{
+  // Preserve the "0 disables speed capping" convention of max_speed_during_avoidance.
+  if( params.max_speed_during_avoidance <= 0.0 )
+  {
+    return 0.0;
+  }
+
+  double speed = std::max( 0.0, params.max_speed_during_avoidance );
+  const double accel = std::max( 0.1, params.avoidance_lateral_accel );
+  if( std::fabs( shift_magnitude ) > 1e-3 )
+  {
+    const double comfort_speed =
+      std::max( 0.0, ramp_length ) *
+      std::sqrt( accel / ( 6.0 * std::fabs( shift_magnitude ) ) );
+    speed = std::min( speed, comfort_speed );
+  }
+  return std::max( speed, std::max( 0.0, params.min_avoidance_speed ) );
+}
+
 ObstacleAvoidanceResult
 try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                              const map::Route& route,
@@ -620,11 +656,29 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       opposite_lane_shift_variants.end() );
   }
 
+  // Physics-sized entry ramp + maneuver speed (see avoidance_ramp_length /
+  // avoidance_speed_for_shift). The ramp is sized once to the available distance
+  // (shift height is per candidate). Applied to candidate.params so the drivable
+  // check, the modified-route build (which bakes the speed profile) and the
+  // trajectory validation all use the matched short-ramp + slow-speed maneuver:
+  // that is what lets a late replan validate (slow ego turns tight enough to
+  // develop the shift over the short remaining distance) instead of failing.
+  const double ego_front_offset =
+    vehicle_params.wheelbase + vehicle_params.front_axle_to_front_border;
+  const double distance_to_obstacle =
+    obstacle_group->envelope.object_s_min - ego_s_original;
+  const double avoidance_ramp =
+    avoidance_ramp_length( distance_to_obstacle, ego_front_offset, params );
+
   for( const auto& raw_shift : shift_variants )
   {
       RouteShiftPlanCandidate candidate;
       candidate.shift_candidate = raw_shift;
       candidate.params = params;
+      candidate.params.front_clearance = avoidance_ramp;
+      candidate.params.max_speed_during_avoidance =
+        avoidance_speed_for_shift(
+          avoidance_ramp, candidate.shift_candidate.shift, params );
 
       evaluate_shift_candidate(
         candidate.shift_candidate,

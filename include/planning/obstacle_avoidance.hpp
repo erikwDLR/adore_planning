@@ -52,19 +52,13 @@ struct ObstacleAvoidanceParams
   double side_clearance               = 1.0;
 
   // Longitudinal planning distances for stop/shift timing. These do not
-  // inflate stored obstacle geometry.
+  // inflate stored obstacle geometry. front_clearance is now the MAXIMUM entry
+  // ramp; the effective ramp is sized down to the available distance to the
+  // obstacle (avoidance_ramp_length), so a late obstacle where ego is closer
+  // than front_clearance still gets a fitting (shorter) ramp.
   double front_clearance              = 7.0;
   double rear_clearance               = 7.0;
   double stop_before_obstacle         = 8.0;
-
-  // Shorter front-clearance ramp used when REPLANNING mid-maneuver for a newly
-  // appearing obstacle. A late obstacle can leave ego closer than front_clearance
-  // to it, so the full 7 m entry ramp no longer fits the remaining distance and
-  // the replan fails even though there is physical room. The reduced ramp fits
-  // (ego is typically slow / braking by then, so the steeper shift is drivable).
-  // The initial maneuver entry (first obstacle) still uses full front_clearance
-  // and the exit (last obstacle) still uses rear_clearance.
-  double min_front_clearance          = 3.0;
 
   // Allow lateral shifts within the current lane (without changing lanes).
   bool in_lane_shift_enabled = true;
@@ -88,8 +82,21 @@ struct ObstacleAvoidanceParams
   // side.
   bool enforce_drivable_area           = true;
 
-  // 0.0 disables speed capping
-  double max_speed_during_avoidance    = 2.78; // ~10 km/h
+  // Upper speed cap during an avoidance. The actual maneuver speed is sized down
+  // from this so the lateral shift stays within avoidance_lateral_accel over the
+  // (possibly short) entry ramp: v = ramp * sqrt(a / (6*D)) (see
+  // avoidance_speed_for_shift). 0.0 disables speed capping. Raise this to let
+  // small shifts drive faster than a big-shift crawl.
+  double max_speed_during_avoidance    = 2.78; // ~10 km/h upper cap
+
+  // Comfort lateral acceleration used to couple maneuver speed and entry-ramp
+  // length: shorter ramp / larger shift => lower speed so the turn-in stays
+  // drivable; smaller shift => higher speed (no needless crawl).
+  double avoidance_lateral_accel       = 2.0; // m/s^2
+
+  // Creep floor for the sized avoidance speed, so a very tight maneuver slows to
+  // a crawl (and can still fit a short ramp) rather than to a full stop.
+  double min_avoidance_speed           = 0.8; // m/s (~3 km/h)
 
   // Distance ahead of the lateral-shift start (shift_start_s) at which the turn
   // indicator is switched on for an avoidance maneuver. The indicator is derived
@@ -664,6 +671,26 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                              const ObstacleAvoidanceParams& params = {},
                              const std::vector<int>* additional_ignored_participant_ids = nullptr,
                              const std::vector<int>* committed_obstacle_ids = nullptr );
+
+// Effective lateral-shift entry-ramp length: the distance to the obstacle,
+// floored at the ego front overhang (below it the front reaches the obstacle
+// before ego can begin turning) and capped at params.front_clearance (comfort).
+// So a late obstacle where ego is closer than front_clearance gets a fitting
+// shorter ramp instead of one that no longer fits the remaining distance.
+double
+avoidance_ramp_length( double distance_to_obstacle,
+                       double ego_front_offset,
+                       const ObstacleAvoidanceParams& params );
+
+// Maneuver speed sized so a lateral shift of |shift_magnitude| driven over
+// ramp_length stays within params.avoidance_lateral_accel:
+//   v = clamp( ramp * sqrt(a / (6*|D|)), min_avoidance_speed, max_speed_during_avoidance ).
+// Short ramp / big shift => slower (drivable tight turn-in); small shift =>
+// faster (no needless crawl).
+double
+avoidance_speed_for_shift( double ramp_length,
+                           double shift_magnitude,
+                           const ObstacleAvoidanceParams& params );
 
 } // namespace planner
 } // namespace adore

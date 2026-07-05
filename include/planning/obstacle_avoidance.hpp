@@ -60,6 +60,14 @@ struct ObstacleAvoidanceParams
   double rear_clearance               = 7.0;
   double stop_before_obstacle         = 8.0;
 
+  // Pre-commit group-shrink debounce. When a maneuver was planned for several
+  // obstacles and one of them stops blocking the mission route (it vanished or
+  // moved out of the corridor) while ego has not yet begun the shift, the
+  // over-sized maneuver is dropped and re-planned tighter. The shrink must
+  // persist this long before acting, so a one-frame lost detection / footprint
+  // jitter does not collapse a still-valid multi-object shift.
+  double group_shrink_confirm_time    = 0.5; // s
+
   // Allow lateral shifts within the current lane (without changing lanes).
   bool in_lane_shift_enabled = true;
 

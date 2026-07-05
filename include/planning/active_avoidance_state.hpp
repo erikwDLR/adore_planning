@@ -102,6 +102,13 @@ struct ActiveAvoidanceState
   double last_modified_s = std::numeric_limits<double>::quiet_NaN();
   double last_modified_time = std::numeric_limits<double>::quiet_NaN();
 
+  // Debounce timestamp for pre-commit group-shrink detection: the time at which
+  // the set of still-blocking maneuver obstacles first dropped below the planned
+  // count. NaN while the group is intact. Once the shrink has persisted for
+  // group_shrink_confirm_time the over-sized pre-commit maneuver is dropped and
+  // re-planned tighter for the remaining blockers. Cleared on reset().
+  double group_shrink_since_time = std::numeric_limits<double>::quiet_NaN();
+
   // Clear the oncoming-wait latch. Used on maneuver reset, on a freshly
   // (re)committed maneuver, and when the wait releases mid-maneuver.
   void clear_oncoming_wait()
@@ -137,6 +144,8 @@ struct ActiveAvoidanceState
 
     last_modified_s = std::numeric_limits<double>::quiet_NaN();
     last_modified_time = std::numeric_limits<double>::quiet_NaN();
+
+    group_shrink_since_time = std::numeric_limits<double>::quiet_NaN();
   }
 };
 

@@ -47,6 +47,15 @@ struct ObstacleAvoidanceParams
   // [-0.5 * ego_width - ego_corridor_safety_margin, +0.5 * ego_width + ego_corridor_safety_margin].
   double ego_corridor_safety_margin       = 0.2;
 
+  // Longitudinal look-ahead cushion for PREDICTIVE (spatiotemporal) conflict
+  // detection of MOVING objects in check_route_corridor_safety: a predicted object
+  // footprint counts as a corridor conflict when it lies within this distance ahead
+  // of ego's predicted front. It is a safety margin for dynamic conflicts (a
+  // crossing / cut-in), NOT a shift ramp length -- it used to borrow front_clearance
+  // (7 m), which both over-flagged far conflicts and shrank inconsistently to the
+  // per-candidate sized ramp at plan time. Internal constant (not loaded from yaml).
+  double corridor_detect_margin           = 2.5;
+
   // Required lateral distance from the ego outer edge to the real obstacle
   // outer edge. This is the only object clearance requirement.
   double side_clearance               = 1.0;

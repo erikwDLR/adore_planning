@@ -25,13 +25,21 @@ namespace oa_detail
 double
 normalized_stop_before_obstacle( const ObstacleAvoidanceParams& params )
 {
+  // PRE-SHIFT stop stand-off. Used when ego stops before the obstacle WITHOUT having
+  // begun a shift -- e.g. the neighbouring-lane use is not yet approved, so ego waits
+  // until a shift becomes possible. Ego must come to rest BEFORE the shift would
+  // start (obstacle_s_min - front_clearance) so a shift is still executable from
+  // standstill afterwards. Hence the stand-off is at least the shift entry ramp plus
+  // a safety margin (stop_adjustment_offset); a larger configured stop_before_obstacle
+  // is honoured. The DURING-avoidance stop deliberately does NOT use this floor -- it
+  // reads stop_before_obstacle directly and may stop closer to the obstacle (keeping
+  // a safety margin), which is why the floor is applied here in the planner and NOT
+  // globally at parameter load.
   if( params.stop_before_obstacle > params.front_clearance )
   {
     return params.stop_before_obstacle;
   }
-
-  const double adjusted = params.front_clearance + params.stop_adjustment_offset;
-  return adjusted;
+  return params.front_clearance + std::max( 0.0, params.stop_adjustment_offset );
 }
 
 // set_route_points_from_s_to_zero moved to the public API (defined in

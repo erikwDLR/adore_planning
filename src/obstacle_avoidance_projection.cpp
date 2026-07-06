@@ -186,7 +186,12 @@ project_obstacle_to_route_analytic( const map::Route& route,
     return false;
   }
 
-  if( envelope.object_s_max < ego_s - params.rear_clearance )
+  // Only obstacles ahead of ego are actionable: a static object fully behind ego
+  // has already been passed and cannot be avoided. Reject anything whose leading
+  // edge is behind the ego reference point (objects straddling ego are kept). NOT
+  // ego_s - rear_clearance: rear_clearance is the shift ramp-down length, unrelated
+  // to how far behind ego a detection stays relevant.
+  if( envelope.object_s_max < ego_s )
   {
     return false;
   }

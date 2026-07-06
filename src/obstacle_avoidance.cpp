@@ -1380,7 +1380,7 @@ check_route_corridor_safety(
           predicted_footprint->s_max >=
             predicted_ego_rear_s &&
           predicted_footprint->s_min <=
-            predicted_ego_front_s + std::max( 0.0, params.front_clearance ) &&
+            predicted_ego_front_s + std::max( 0.0, params.corridor_detect_margin ) &&
           predicted_footprint->l_max >= corridor_l_min &&
           predicted_footprint->l_min <= corridor_l_max;
 

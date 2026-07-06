@@ -1198,15 +1198,16 @@ check_route_corridor_safety(
     0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const double corridor_half_width =
     ego_half_width + std::max( 0.0, params.ego_corridor_safety_margin );
-  // Corridor check covers ego's own footprint forward, not a rear tail: start at
-  // ego's rear bumper, NOT ego_s - rear_clearance. rear_clearance is the maneuver's
-  // shift ramp-down length and has nothing to do with how far behind ego to scan;
-  // the old 7 m tail pulled already-passed objects into the check. Objects ego has
-  // cleared laterally are still excluded by the corridor_half_width test, and an
-  // object alongside ego's body that is laterally too close (a scrape in progress)
-  // is still caught.
+  // Corridor check scans only AHEAD of ego: start at ego's front bumper. An object
+  // beside ego is unactionable (braking cannot change lateral clearance), and one
+  // ego has cleared laterally is excluded by the corridor_half_width test anyway;
+  // only what is ahead can still be avoided or braked for. NOT ego_s - rear_clearance
+  // (rear_clearance is the maneuver's shift ramp-down length, unrelated to scan
+  // range) and NOT ego's rear bumper. Trade-off: a crossing object currently beside
+  // or behind ego is no longer evaluated predictively until it reaches the ahead
+  // region -- accepted; it is caught as it crosses in.
   const double check_start_s =
-    ego_s - std::max( 0.0, ego_params.rear_border_to_rear_axle );
+    ego_s + ego_params.wheelbase + ego_params.front_axle_to_front_border;
   const double check_end_s =
     ego_s + std::max( 0.0, params.modified_route_max_check_distance );
   const double corridor_l_min = -corridor_half_width;

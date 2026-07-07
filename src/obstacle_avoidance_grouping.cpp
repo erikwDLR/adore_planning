@@ -123,15 +123,6 @@ participant_heading_is_opposite_to_route(
   return std::fabs( yaw_diff ) >= params.min_oncoming_heading_diff;
 }
 
-AvoidanceGroup
-make_avoidance_group_from_obstacle( const ObstacleEnvelope& obstacle )
-{
-  AvoidanceGroup group;
-  group.obstacles.push_back( obstacle );
-  group.envelope = obstacle;
-  return group;
-}
-
 // Carry several simultaneously-detected obstacles as one avoidance group. The
 // obstacles keep their individual hulls (the shift is composed per obstacle in
 // avoidance_shift_offset_at_s, so there is no lateral union that would inflate the

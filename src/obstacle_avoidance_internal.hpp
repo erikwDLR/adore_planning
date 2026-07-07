@@ -201,9 +201,6 @@ participant_heading_is_opposite_to_route(
   const ObstacleAvoidanceParams& params );
 
 AvoidanceGroup
-make_avoidance_group_from_obstacle( const ObstacleEnvelope& obstacle );
-
-AvoidanceGroup
 make_avoidance_group_from_obstacles( std::vector<ObstacleEnvelope> obstacles );
 
 bool

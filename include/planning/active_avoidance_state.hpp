@@ -20,21 +20,6 @@ namespace adore
 namespace planner
 {
 
-// Per-participant memory of the largest object dimensions observed for a
-// maneuver obstacle. Perception reports a footprint whose size is not fixed and
-// grows as ego approaches (a partially observed obstacle looks smaller at first,
-// then larger). Since only under-estimation is dangerous, we latch the maximum
-// object-local extent ever seen and never shrink it. Only the object-LOCAL
-// length/width are stored, not a route-frame s/l span: unioning route-frame
-// projections of a moving object would smear into a large "swept hull". The
-// consumer re-projects the current pose with these max dimensions each cycle.
-struct TrackedObstacleEnvelope
-{
-  int participant_id = -1;
-  double max_length = 0.0;
-  double max_width = 0.0;
-};
-
 // Persistent state of an active obstacle-avoidance maneuver. Lives in the
 // planner library (not the ROS node) so the maneuver lifecycle can be operated
 // on and unit-tested without any ROS dependency. The decision-maker node owns
@@ -80,12 +65,6 @@ struct ActiveAvoidanceState
   // than by any obstacle memory. Sticky: only reset() clears it, so a dynamic
   // replan that moves shift_start_s cannot un-commit an in-progress maneuver.
   bool committed = false;
-
-  // Largest object dimensions seen for each maneuver obstacle, keyed by
-  // participant id. Fed directly from perception every cycle (not from the
-  // conflict path, which ignores the maneuver's own obstacles), latched to the
-  // maximum, held for the whole maneuver with no decay, and cleared on reset().
-  std::vector<TrackedObstacleEnvelope> tracked_obstacles;
 
   // Oncoming-wait latch. Once the opposite-lane monitor decides to stop for an
   // oncoming participant, hold that stop until the participant has cleared the
@@ -137,7 +116,6 @@ struct ActiveAvoidanceState
 
     maneuver = ObstacleAvoidanceManeuver{};
     committed = false;
-    tracked_obstacles.clear();
 
     clear_oncoming_wait();
 

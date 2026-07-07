@@ -691,8 +691,25 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
   // develop the shift over the short remaining distance) instead of failing.
   const double ego_front_offset =
     vehicle_params.wheelbase + vehicle_params.front_axle_to_front_border;
-  const double distance_to_obstacle =
-    obstacle_group->envelope.object_s_min - ego_s_original;
+  // Size the entry ramp to the nearest NEW obstacle edge, not the group's front edge.
+  // At a mid-maneuver widen the group's front edge is the object ego is already
+  // passing (its committed/held shift), right next to ego -> the ramp would collapse to
+  // ego_front_offset and the physics speed to min_avoidance_speed for the whole
+  // remaining maneuver. The committed object needs no new turn-in; only a genuinely
+  // new object (not committed_hold) sets the ramp / speed. Falls back to the group
+  // front edge for the initial plan, where nothing is committed_hold.
+  double new_obstacle_s_min = std::numeric_limits<double>::infinity();
+  for( const auto& obstacle : obstacle_group->obstacles )
+  {
+    if( !obstacle.committed_hold )
+    {
+      new_obstacle_s_min = std::min( new_obstacle_s_min, obstacle.object_s_min );
+    }
+  }
+  const double distance_reference_s =
+    std::isfinite( new_obstacle_s_min ) ? new_obstacle_s_min
+                                        : obstacle_group->envelope.object_s_min;
+  const double distance_to_obstacle = distance_reference_s - ego_s_original;
   const double avoidance_ramp =
     avoidance_ramp_length( distance_to_obstacle, ego_front_offset, params );
 

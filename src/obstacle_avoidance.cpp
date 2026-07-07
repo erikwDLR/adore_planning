@@ -371,7 +371,10 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                              const dynamics::TrafficParticipantSet& traffic_participants,
                              const ObstacleAvoidanceParams& params,
                              const std::vector<int>* additional_ignored_participant_ids,
-                             const std::vector<int>* committed_obstacle_ids )
+                             double shift_direction_sign,
+                             double held_shift_s_min,
+                             double held_shift_s_max,
+                             double held_lateral_shift )
 {
   ObstacleAvoidanceResult result;
   result.modified_route = route;
@@ -386,7 +389,10 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     traffic_participants,
     planner.get_physical_vehicle_parameters(),
     params,
-    additional_ignored_participant_ids );
+    additional_ignored_participant_ids,
+    held_shift_s_min,
+    held_shift_s_max,
+    held_lateral_shift );
 
   if( !obstacle_group.has_value() )
   {
@@ -656,6 +662,26 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       opposite_lane_shift_variants.end() );
   }
 
+  // Lock the shift to a single lateral direction when requested. A mid-maneuver
+  // extension re-plans on the route ego is already following (so an obstacle it has
+  // cleared contributes ~0 shift) and must only ever shift FURTHER in the direction
+  // ego is already going. Exploring the opposite direction here would let a smaller
+  // opposite shift win and pull ego back toward the obstacle it is passing.
+  if( std::fabs( shift_direction_sign ) > 1e-6 )
+  {
+    const double sign = shift_direction_sign;
+    shift_variants.erase(
+      std::remove_if(
+        shift_variants.begin(),
+        shift_variants.end(),
+        [sign]( const ShiftCandidate& candidate )
+        {
+          return !( ( sign > 0.0 && candidate.shift > 0.0 ) ||
+                    ( sign < 0.0 && candidate.shift < 0.0 ) );
+        } ),
+      shift_variants.end() );
+  }
+
   // Physics-sized entry ramp + maneuver speed (see avoidance_ramp_length /
   // avoidance_speed_for_shift). The ramp is sized once to the available distance
   // (shift height is per candidate). Applied to candidate.params so the drivable
@@ -792,8 +818,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           candidate.shift_candidate.type,
           vehicle_params,
           candidate.params,
-          ego_s_original,
-          committed_obstacle_ids );
+          ego_s_original );
 
       if( !candidate.validation.valid )
       {
@@ -884,20 +909,16 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     std::string reason =
       "driving mission (stop before obstacle: no validated route-shift candidate)";
 
-    // Diagnostic: surface the group composition and EVERY rejection category (not
-    // just the first) so a late-appearing second obstacle can be told apart:
-    // uniform merged-group shift capped by drivable-area vs a separate in-lane
-    // candidate failing at the own-lane boundary. type: 0=InLane 1=Adjacent
-    // 2=Opposite (AvoidanceCandidateType order).
+    // Diagnostic: surface the obstacle geometry and EVERY rejection category (not
+    // just the first) so a stop can be told apart: the required shift capped by the
+    // drivable-area check vs a trajectory / oncoming failure. type: 0=InLane
+    // 1=Adjacent 2=Opposite (AvoidanceCandidateType order).
     {
       const auto& diag_group = obstacle_group.value();
       char group_buf[320];
       std::snprintf(
         group_buf, sizeof( group_buf ),
-        " group{n=%zu hard_merged=%d hull_curve=%d s=[%.1f,%.1f] l=[%.2f,%.2f]}",
-        diag_group.obstacles.size(),
-        static_cast<int>( diag_group.hard_merged ),
-        static_cast<int>( diag_group.uses_hull_curve ),
+        " obstacle{s=[%.1f,%.1f] l=[%.2f,%.2f]}",
         diag_group.envelope.object_s_min, diag_group.envelope.object_s_max,
         diag_group.envelope.object_l_min, diag_group.envelope.object_l_max );
       reason += group_buf;
@@ -971,72 +992,13 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
       "driving mission (stop before obstacle: selected route-shift planning failed)" );
   }
 
-  const auto final_validation =
-    validate_planned_shift_trajectory(
-      route,
-      result.trajectory,
-      obstacle_group.value(),
-      result.lateral_shift,
-      result.in_lane,
-      selected.shift_candidate.type,
-      vehicle_params,
-      selected.params,
-      ego_s_original,
-      committed_obstacle_ids );
-
-  if( !final_validation.valid )
-  {
-    return plan_stop_before_obstacle(
-      ObstacleAvoidanceMode::StopBeforeObstacle,
-      "driving mission (stop before obstacle: selected route-shift trajectory validation failed)" );
-  }
-
-  const auto final_route_safety =
-    check_route_corridor_safety(
-      result.modified_route,
-      ego,
-      traffic_participants,
-      vehicle_params,
-      selected.params,
-      &result.trajectory,
-      &ignored_participant_ids );
-
-  const bool ignore_final_other_lane_oncoming =
-    selected.shift_candidate.type == AvoidanceCandidateType::InLane &&
-    final_route_safety.has_conflict &&
-    is_oncoming_other_lane_conflict(
-      final_route_safety.conflict,
-      vehicle_params,
-      selected.params );
-
-  if( ( final_route_safety.has_conflict || !final_route_safety.safe ) &&
-      !ignore_final_other_lane_oncoming )
-  {
-    return plan_stop_before_obstacle(
-      ObstacleAvoidanceMode::StopBeforeObstacle,
-      "driving mission (stop before obstacle: selected route-shift failed active-route safety check)" );
-  }
-
-  if( selected.uses_opposite_lane )
-  {
-    const auto final_oncoming_check =
-      check_oncoming_gap(
-        route,
-        ego,
-        traffic_participants,
-        obstacle_group.value(),
-        result.lateral_shift,
-        vehicle_params,
-        &result.trajectory,
-        selected.params );
-
-    if( final_oncoming_check.conflict )
-    {
-      return plan_stop_before_obstacle(
-        ObstacleAvoidanceMode::WaitForOncoming,
-        "driving mission (waiting before obstacle: oncoming traffic conflict)" );
-    }
-  }
+  // No re-validation of the selected candidate here: only candidates that already
+  // passed validate_planned_shift_trajectory, check_route_corridor_safety and (for
+  // opposite-lane) check_oncoming_gap in the candidate loop above enter
+  // accepted_candidates, and result.{trajectory,modified_route,lateral_shift} are
+  // verbatim copies of the selected candidate's. Re-running those checks with the
+  // identical inputs cannot change the outcome, so the former final_validation /
+  // final_route_safety / final_oncoming_check block was pure duplication.
 
   if( result.mode == ObstacleAvoidanceMode::InLaneShift )
   {
@@ -1079,12 +1041,14 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     result.obstacle_id = obstacle_group->envelope.id;
     result.obstacle_ids = obstacle_group->envelope.participant_ids;
     result.obstacle_s_min = obstacle_group->envelope.object_s_min;
+    result.obstacle_s_max = obstacle_group->envelope.object_s_max;
 
     result.maneuver.active = true;
     result.maneuver.mode = result.mode;
     result.maneuver.obstacle_id = result.obstacle_id;
     result.maneuver.obstacle_ids = result.obstacle_ids;
     result.maneuver.obstacle_s_min = result.obstacle_s_min;
+    result.maneuver.obstacle_s_max = result.obstacle_s_max;
     result.maneuver.shift_start_s = result.shift_start_s;
     result.maneuver.shift_end_s = result.shift_end_s;
     result.maneuver.release_s = result.shift_end_s;
@@ -1376,11 +1340,16 @@ check_route_corridor_safety(
           continue;
         }
 
+        // Longitudinal lookahead added to the ego front when testing a predicted
+        // dynamic-obstacle overlap, so an object about to enter the corridor just
+        // ahead is caught one step early. Internal detection tolerance, not a knob.
+        constexpr double predicted_overlap_front_margin = 2.5;
+
         const bool predicted_overlap =
           predicted_footprint->s_max >=
             predicted_ego_rear_s &&
           predicted_footprint->s_min <=
-            predicted_ego_front_s + std::max( 0.0, params.corridor_detect_margin ) &&
+            predicted_ego_front_s + predicted_overlap_front_margin &&
           predicted_footprint->l_max >= corridor_l_min &&
           predicted_footprint->l_min <= corridor_l_max;
 

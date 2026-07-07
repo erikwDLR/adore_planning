@@ -448,43 +448,23 @@ generate_shift_candidate_variants(
       ego_params,
       params );
 
-  const int extra_steps =
-    params.enable_multi_candidate_route_shift
-      ? std::max( 0, params.lateral_candidate_extra_steps )
-      : 0;
-
-  const double extra_step =
-    std::max( 0.0, params.lateral_candidate_extra_step );
-
+  // One minimal-shift candidate per side: the required shift to clear the group by
+  // side_clearance. No wider fan-out -- a wider shift never clears the obstacle
+  // better and is less likely to stay drivable, and the side_clearance margin
+  // absorbs planner undershoot. Left base is > 0, right base < 0, so the two can
+  // never coincide; no duplicate check needed.
   auto append_side =
     [&]( const ShiftCandidate& base, double sign )
     {
-      for( int i = 0; i <= extra_steps; ++i )
+      ShiftCandidate candidate;
+      candidate.shift = base.shift;
+      candidate.valid =
+        std::isfinite( candidate.shift ) &&
+        ( sign > 0.0 ? candidate.shift > 0.0 : candidate.shift < 0.0 );
+
+      if( candidate.valid )
       {
-        ShiftCandidate candidate;
-        candidate.shift = base.shift + sign * extra_step * static_cast<double>( i );
-        candidate.valid =
-          std::isfinite( candidate.shift ) &&
-          ( sign > 0.0 ? candidate.shift > 0.0 : candidate.shift < 0.0 );
-
-        if( !candidate.valid )
-        {
-          continue;
-        }
-
-        const bool duplicate =
-          std::any_of(
-            candidates.begin(),
-            candidates.end(),
-            [&]( const ShiftCandidate& existing )
-            {
-              return std::fabs( existing.shift - candidate.shift ) < 1e-6;
-            } );
-
-        if( !duplicate )
-        {
-          candidates.push_back( candidate );
-        }
+        candidates.push_back( candidate );
       }
     };
 
@@ -671,8 +651,7 @@ validate_planned_shift_trajectory(
   AvoidanceCandidateType candidate_type,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params,
-  double initial_s_hint,
-  const std::vector<int>* skip_clearance_obstacle_ids )
+  double initial_s_hint )
 {
   TrajectoryValidationResult result;
   result.reason = "trajectory valid";
@@ -729,7 +708,8 @@ validate_planned_shift_trajectory(
       traj_start_l =
         signed_lateral_offset( first_frame, math::Point2d{ first_state.x, first_state.y } );
       traj_start_route_off =
-        avoidance_shift_offset_at_s( first_s, group, lateral_shift, ego_params, params );
+        avoidance_shift_offset_at_s(
+          first_s, group, lateral_shift, ego_params, params );
     }
   }
 
@@ -767,9 +747,11 @@ validate_planned_shift_trajectory(
         ego_params,
         params );
     const double group_timing_s_min =
-      group.envelope.object_s_min - std::max( 0.0, params.front_clearance );
+      group.envelope.object_s_min - ego_front_offset -
+      std::max( 0.0, params.front_clearance );
     const double group_timing_s_max =
-      group.envelope.object_s_max + std::max( 0.0, params.rear_clearance );
+      group.envelope.object_s_max + ego_rear_offset +
+      std::max( 0.0, params.rear_clearance );
     const bool near_obstacle =
       state_s >= group_timing_s_min &&
       state_s <= group_timing_s_max;
@@ -984,14 +966,10 @@ validate_planned_shift_trajectory(
       // obstacle they are re-checked from ego's current, transiently lagging /
       // angled turn-in pose, where the committed obstacle spuriously fails even
       // though ego is passing it correctly. They stay in the group (so the route
-      // still shifts to clear them); only their re-validation is suppressed.
-      if( skip_clearance_obstacle_ids != nullptr &&
-          !obstacle.participant_ids.empty() &&
-          std::all_of(
-            obstacle.participant_ids.begin(),
-            obstacle.participant_ids.end(),
-            [&]( int id )
-            { return contains_participant_id( *skip_clearance_obstacle_ids, id ); } ) )
+      // still shifts to clear them); only their re-validation is suppressed. The
+      // flag is set geometrically (span overlaps the committed hold region), so
+      // this is id-independent and survives the object dropping out of perception.
+      if( obstacle.committed_hold )
       {
         continue;
       }

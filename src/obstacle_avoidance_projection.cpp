@@ -223,19 +223,6 @@ project_obstacle_to_route_analytic( const map::Route& route,
   return true;
 }
 
-void
-refresh_obstacle_envelope_derived_values( ObstacleEnvelope& envelope,
-                                          const ObstacleAvoidanceParams& )
-{
-  envelope.s_min = envelope.object_s_min;
-  envelope.s_max = envelope.object_s_max;
-  envelope.l_min = envelope.object_l_min;
-  envelope.l_max = envelope.object_l_max;
-
-  envelope.center_s = 0.5 * ( envelope.s_min + envelope.s_max );
-  envelope.center_l = 0.5 * ( envelope.l_min + envelope.l_max );
-}
-
 std::optional<ParticipantFootprintOnRoute>
 project_participant_footprint_to_route(
   const map::Route& route,

@@ -61,6 +61,11 @@ struct ActiveAvoidanceState
   // reaches its maximum here (ramp-up ends, plateau begins), so it is used as
   // the turn-indicator cutoff. Infinity until a maneuver populates it.
   double obstacle_s_min = std::numeric_limits<double>::infinity();
+  // Trailing edge of the committed obstacle span. With obstacle_s_min and
+  // lateral_shift it reconstructs the committed shift as a synthetic "hold" region
+  // on a replan, so the maneuver keeps its shift geometrically (no obstacle-id
+  // memory) even if perception drops the object mid-shift.
+  double obstacle_s_max = -std::numeric_limits<double>::infinity();
 
   double lateral_shift = 0.0;
   bool in_lane = false;
@@ -102,13 +107,6 @@ struct ActiveAvoidanceState
   double last_modified_s = std::numeric_limits<double>::quiet_NaN();
   double last_modified_time = std::numeric_limits<double>::quiet_NaN();
 
-  // Debounce timestamp for pre-commit group-shrink detection: the time at which
-  // the set of still-blocking maneuver obstacles first dropped below the planned
-  // count. NaN while the group is intact. Once the shrink has persisted for
-  // group_shrink_confirm_time the over-sized pre-commit maneuver is dropped and
-  // re-planned tighter for the remaining blockers. Cleared on reset().
-  double group_shrink_since_time = std::numeric_limits<double>::quiet_NaN();
-
   // Clear the oncoming-wait latch. Used on maneuver reset, on a freshly
   // (re)committed maneuver, and when the wait releases mid-maneuver.
   void clear_oncoming_wait()
@@ -132,6 +130,7 @@ struct ActiveAvoidanceState
     shift_end_s = 0.0;
     release_s = 0.0;
     obstacle_s_min = std::numeric_limits<double>::infinity();
+    obstacle_s_max = -std::numeric_limits<double>::infinity();
 
     lateral_shift = 0.0;
     in_lane = false;
@@ -144,8 +143,6 @@ struct ActiveAvoidanceState
 
     last_modified_s = std::numeric_limits<double>::quiet_NaN();
     last_modified_time = std::numeric_limits<double>::quiet_NaN();
-
-    group_shrink_since_time = std::numeric_limits<double>::quiet_NaN();
   }
 };
 

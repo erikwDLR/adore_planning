@@ -43,40 +43,45 @@ apply_avoidance_speed_profile( map::Route& route,
 double
 avoidance_shift_alpha_at_s( double s,
                             const ObstacleEnvelope& obstacle,
+                            const dynamics::PhysicalVehicleParameters& ego_params,
                             const ObstacleAvoidanceParams& params )
 {
-  // Shift geometry keyed directly to the obstacle: the lateral shift ramps up over
-  // front_clearance ahead of the obstacle, holds full shift alongside it
-  // [object_s_min, object_s_max], and ramps back down over rear_clearance behind
-  // it. With equal clearances this is symmetric about the obstacle. front_clearance
-  // and rear_clearance are the only longitudinal knobs (no implicit ego offset).
+  // The shift holds FULL magnitude over every ego-center (rear-axle) position where
+  // any part of the ego footprint is alongside the obstacle: the front corner reaches
+  // object_s_min while the rear axle is still ego_front_offset short, and the rear
+  // corner clears object_s_max only ego_rear_offset later. So the full-shift plateau
+  // spans [object_s_min - ego_front_offset, object_s_max + ego_rear_offset], with
+  // front_clearance / rear_clearance the comfort ramp lengths added outside it.
+  const double ego_front_offset =
+    ego_params.wheelbase + ego_params.front_axle_to_front_border;
+  const double ego_rear_offset = ego_params.rear_border_to_rear_axle;
+
+  const double hold_start_s = obstacle.object_s_min - ego_front_offset;
+  const double hold_end_s   = obstacle.object_s_max + ego_rear_offset;
+
   const double shift_start_s =
-    std::max(
-      0.0,
-      obstacle.object_s_min - std::max( 0.0, params.front_clearance ) );
+    std::max( 0.0, hold_start_s - std::max( 0.0, params.front_clearance ) );
   const double shift_end_s =
-    obstacle.object_s_max + std::max( 0.0, params.rear_clearance );
+    hold_end_s + std::max( 0.0, params.rear_clearance );
 
   if( s < shift_start_s || s > shift_end_s )
   {
     return 0.0;
   }
 
-  if( s < obstacle.object_s_min )
+  if( s < hold_start_s )
   {
     return smoothstep01(
-      ( s - shift_start_s ) /
-      std::max( 0.1, obstacle.object_s_min - shift_start_s ) );
+      ( s - shift_start_s ) / std::max( 0.1, hold_start_s - shift_start_s ) );
   }
 
-  if( s <= obstacle.object_s_max )
+  if( s <= hold_end_s )
   {
     return 1.0;
   }
 
   return 1.0 - smoothstep01(
-    ( s - obstacle.object_s_max ) /
-    std::max( 0.1, shift_end_s - obstacle.object_s_max ) );
+    ( s - hold_end_s ) / std::max( 0.1, shift_end_s - hold_end_s ) );
 }
 
 double
@@ -134,7 +139,7 @@ avoidance_shift_offset_at_s(
   for( const auto& obstacle : group.obstacles )
   {
     const double alpha =
-      avoidance_shift_alpha_at_s( s, obstacle, params );
+      avoidance_shift_alpha_at_s( s, obstacle, ego_params, params );
     if( alpha <= 0.0 )
     {
       continue;
@@ -233,13 +238,20 @@ build_modified_avoidance_route( const map::Route& route,
   }
 
   // Clearance-based shift window (see avoidance_shift_alpha_at_s): matches the
-  // lateral shift window so the speed profile ramps over the same span.
+  // lateral shift window (plateau extended by the ego front/rear overhang, plus the
+  // front_clearance / rear_clearance ramps) so the speed profile ramps over the same
+  // span.
+  const double ego_front_offset =
+    ego_params.wheelbase + ego_params.front_axle_to_front_border;
+  const double ego_rear_offset = ego_params.rear_border_to_rear_axle;
   const double shift_start_s =
     std::max(
       0.0,
-      group.envelope.object_s_min - std::max( 0.0, params.front_clearance ) );
+      group.envelope.object_s_min - ego_front_offset -
+        std::max( 0.0, params.front_clearance ) );
   const double shift_end_s =
-    group.envelope.object_s_max + std::max( 0.0, params.rear_clearance );
+    group.envelope.object_s_max + ego_rear_offset +
+    std::max( 0.0, params.rear_clearance );
   apply_avoidance_speed_profile(
     modified_route,
     ego_s,

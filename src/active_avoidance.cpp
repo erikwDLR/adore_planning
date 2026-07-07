@@ -47,6 +47,7 @@ start_active_avoidance_state(
     state.shift_end_s = oa_result.shift_end_s;
     state.release_s = oa_result.shift_end_s;
     state.obstacle_s_min = oa_result.obstacle_s_min;
+    state.obstacle_s_max = oa_result.obstacle_s_max;
 
     state.lateral_shift = oa_result.lateral_shift;
     state.in_lane = oa_result.in_lane;

@@ -47,15 +47,6 @@ struct ObstacleAvoidanceParams
   // [-0.5 * ego_width - ego_corridor_safety_margin, +0.5 * ego_width + ego_corridor_safety_margin].
   double ego_corridor_safety_margin       = 0.2;
 
-  // Longitudinal look-ahead cushion for PREDICTIVE (spatiotemporal) conflict
-  // detection of MOVING objects in check_route_corridor_safety: a predicted object
-  // footprint counts as a corridor conflict when it lies within this distance ahead
-  // of ego's predicted front. It is a safety margin for dynamic conflicts (a
-  // crossing / cut-in), NOT a shift ramp length -- it used to borrow front_clearance
-  // (7 m), which both over-flagged far conflicts and shrank inconsistently to the
-  // per-candidate sized ramp at plan time. Internal constant (not loaded from yaml).
-  double corridor_detect_margin           = 2.5;
-
   // Required lateral distance from the ego outer edge to the real obstacle
   // outer edge. This is the only object clearance requirement.
   double side_clearance               = 1.0;
@@ -69,14 +60,6 @@ struct ObstacleAvoidanceParams
   double rear_clearance               = 7.0;
   double stop_before_obstacle         = 8.0;
 
-  // Pre-commit group-shrink debounce. When a maneuver was planned for several
-  // obstacles and one of them stops blocking the mission route (it vanished or
-  // moved out of the corridor) while ego has not yet begun the shift, the
-  // over-sized maneuver is dropped and re-planned tighter. The shrink must
-  // persist this long before acting, so a one-frame lost detection / footprint
-  // jitter does not collapse a still-valid multi-object shift.
-  double group_shrink_confirm_time    = 0.5; // s
-
   // Allow lateral shifts within the current lane (without changing lanes).
   bool in_lane_shift_enabled = true;
 
@@ -86,12 +69,6 @@ struct ObstacleAvoidanceParams
   // Allow use of opposite-direction lanes (oncoming lanes). Requires special
   // oncoming traffic checks.
   bool opposite_lane_enabled = true;
-
-  // Enable multi-obstacle clustering and hull-bridge behavior. If false, only
-  // the nearest ego-corridor obstacle is used for OA, with no cluster/hull link.
-  // If true, nearby ego-corridor obstacles form one maneuver while preserving
-  // their individual obstacle hulls.
-  bool clustering_enabled = true;
 
   // If enabled, a lateral-shift candidate is accepted only if the ego footprint
   // remains inside the current route lane or, if the relevant mode switch is
@@ -126,8 +103,6 @@ struct ObstacleAvoidanceParams
 
   // Candidate generation.
   bool validate_shifted_trajectory = true;
-  int lateral_candidate_extra_steps = 2;
-  double lateral_candidate_extra_step = 0.30;
 
   // If enabled, every active avoidance state is monitored against the route that ego is
   // actually following.
@@ -158,25 +133,6 @@ struct ObstacleAvoidanceParams
   double lane_boundary_join_slack      = 0.25;
 
   double max_projection_distance_from_route = 5.0;
-
-  // Advanced/internal multi-obstacle grouping. Used only when clustering_enabled
-  // is true.
-  //
-  // Gap <= cluster_hold_gap_s:
-  //   keep individual obstacle hulls and connect their per-object lateral
-  //   shift targets directly. This is not a geometric rectangle merge.
-  //
-  // cluster_hold_gap_s < gap <= shift_hull_gap_s:
-  //   keep the raw obstacle envelopes separate, but create one AvoidanceGroup
-  //   and connect the individual shift profiles with a smooth hull bridge.
-  //
-  // gap > shift_hull_gap_s:
-  //   treat the obstacles as separate maneuvers.
-  double cluster_hold_gap_s = 10.0;
-  double shift_hull_gap_s = 20.0;
-
-  // Internal switch for evaluating extra lateral shift variants.
-  bool enable_multi_candidate_route_shift = true;
 
   // ============================================================================
   // Internal/advanced oncoming traffic gap-acceptance parameters.
@@ -492,6 +448,7 @@ struct ObstacleAvoidanceManeuver
   int obstacle_id = -1;
   std::vector<int> obstacle_ids;
   double obstacle_s_min = std::numeric_limits<double>::infinity();
+  double obstacle_s_max = -std::numeric_limits<double>::infinity();
 
   double shift_start_s = 0.0;
   double shift_end_s = 0.0;
@@ -539,6 +496,7 @@ struct ObstacleAvoidanceResult
   int obstacle_id = -1;
   std::vector<int> obstacle_ids;
   double obstacle_s_min = std::numeric_limits<double>::infinity();
+  double obstacle_s_max = -std::numeric_limits<double>::infinity();
 
   double shift_start_s = 0.0;
   double shift_end_s = 0.0;
@@ -687,7 +645,19 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                              const dynamics::TrafficParticipantSet& traffic_participants,
                              const ObstacleAvoidanceParams& params = {},
                              const std::vector<int>* additional_ignored_participant_ids = nullptr,
-                             const std::vector<int>* committed_obstacle_ids = nullptr );
+                             // When non-zero, restrict the shift to this lateral
+                             // direction (+left / -right). Used by a mid-maneuver
+                             // extension so it only ever widens the current side.
+                             double shift_direction_sign = 0.0,
+                             // Committed shift to hold across a mid-maneuver replan
+                             // (its route s-span + signed magnitude). Rebuilt as a
+                             // synthetic "hold" obstacle so the maneuver keeps its
+                             // shift id-independently -- even if perception drops the
+                             // real object -- and the new object bridges smoothly onto
+                             // it. Default (inf/-inf/0) = no hold (initial plan).
+                             double held_shift_s_min = std::numeric_limits<double>::infinity(),
+                             double held_shift_s_max = -std::numeric_limits<double>::infinity(),
+                             double held_lateral_shift = 0.0 );
 
 // Effective lateral-shift entry-ramp length: the distance to the obstacle,
 // floored at the ego front overhang (below it the front reaches the obstacle

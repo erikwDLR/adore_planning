@@ -119,6 +119,12 @@ struct ObstacleEnvelope
   double center_l = 0.0;
 
   bool overlaps_ego_corridor = false;
+
+  // Belongs to the maneuver ego is already executing (its span overlaps the committed
+  // hold region). Its clearance is not re-validated from ego's transient turn-in pose,
+  // where the object ego is currently passing spuriously fails. Set geometrically in
+  // find_static_obstacle_group_on_route -- id-independent.
+  bool committed_hold = false;
 };
 
 struct ParticipantFootprintOnRoute
@@ -153,10 +159,6 @@ project_obstacle_to_route_analytic( const map::Route& route,
                                     double ego_half_width,
                                     ObstacleEnvelope& envelope );
 
-void
-refresh_obstacle_envelope_derived_values( ObstacleEnvelope& envelope,
-                                          const ObstacleAvoidanceParams& params );
-
 std::optional<ParticipantFootprintOnRoute>
 project_participant_footprint_to_route(
   const map::Route& route,
@@ -167,12 +169,15 @@ project_participant_footprint_to_route(
 // Static-obstacle detection / clustering (obstacle_avoidance_grouping.cpp)
 // ---------------------------------------------------------------------------
 
+// A single static obstacle to avoid. Retained as a thin carrier (obstacles holds
+// exactly the one trigger obstacle, envelope mirrors it) so the shift / candidate /
+// oncoming helpers keep their existing interface. Multi-obstacle clustering was
+// removed: a further obstacle is handled cyclically from the driven route, not
+// pre-merged here.
 struct AvoidanceGroup
 {
   std::vector<ObstacleEnvelope> obstacles;
   ObstacleEnvelope envelope;
-  bool uses_hull_curve = false;
-  bool hard_merged = false;
 };
 
 // Participant classification helpers (shared with the oncoming module).
@@ -198,16 +203,8 @@ participant_heading_is_opposite_to_route(
 AvoidanceGroup
 make_avoidance_group_from_obstacle( const ObstacleEnvelope& obstacle );
 
-void
-append_obstacle_to_avoidance_group( AvoidanceGroup& group,
-                                    const ObstacleEnvelope& obstacle,
-                                    const ObstacleAvoidanceParams& params,
-                                    bool hard_merge );
-
-std::vector<AvoidanceGroup>
-make_avoidance_groups_from_clusters(
-  const std::vector<ObstacleEnvelope>& obstacle_hulls,
-  const ObstacleAvoidanceParams& params );
+AvoidanceGroup
+make_avoidance_group_from_obstacles( std::vector<ObstacleEnvelope> obstacles );
 
 bool
 avoidance_group_contains_participant_id( const AvoidanceGroup& group, int id );
@@ -219,7 +216,10 @@ find_static_obstacle_group_on_route(
   const dynamics::TrafficParticipantSet& traffic_participants,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params,
-  const std::vector<int>* ignored_participant_ids = nullptr );
+  const std::vector<int>* ignored_participant_ids = nullptr,
+  double held_shift_s_min = std::numeric_limits<double>::infinity(),
+  double held_shift_s_max = -std::numeric_limits<double>::infinity(),
+  double held_lateral_shift = 0.0 );
 
 // ---------------------------------------------------------------------------
 // Lateral-shift profile math + modified-route construction (obstacle_avoidance_shift.cpp)
@@ -236,6 +236,7 @@ apply_avoidance_speed_profile( map::Route& route,
 double
 avoidance_shift_alpha_at_s( double s,
                             const ObstacleEnvelope& obstacle,
+                            const dynamics::PhysicalVehicleParameters& ego_params,
                             const ObstacleAvoidanceParams& params );
 
 double
@@ -516,8 +517,7 @@ validate_planned_shift_trajectory(
   AvoidanceCandidateType candidate_type,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params,
-  double initial_s_hint,
-  const std::vector<int>* skip_clearance_obstacle_ids = nullptr );
+  double initial_s_hint );
 
 double
 score_route_shift_candidate( const RouteShiftPlanCandidate& candidate,

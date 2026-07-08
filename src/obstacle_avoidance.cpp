@@ -413,6 +413,14 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     stop_result.mode = mode;
     stop_result.reason = reason;
 
+    // Concise, colleague-facing label for the displayed behavior. The verbose `reason`
+    // (obstacle geometry + every rejection category) stays in stop_result.reason for the
+    // diagnostic logs; it must not leak into the trajectory label.
+    const std::string stop_label =
+      mode == ObstacleAvoidanceMode::WaitForOncoming
+        ? "driving mission (waiting for oncoming)"
+        : "driving mission (stopping for obstacle)";
+
     const auto& stop_obstacle = obstacle_group->obstacles.front();
     stop_result.obstacle_id = stop_obstacle.id;
     stop_result.obstacle_ids =
@@ -502,7 +510,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
       if( !stop_result.trajectory.states.empty() )
       {
-        stop_result.trajectory.label = reason;
+        stop_result.trajectory.label = stop_label;
         stop_result.success = true;
         return stop_result;
       }
@@ -553,7 +561,7 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
     }
 
-    stop_result.trajectory.label = reason;
+    stop_result.trajectory.label = stop_label;
     stop_result.success = true;
 
     return stop_result;
@@ -1019,15 +1027,15 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
   if( result.mode == ObstacleAvoidanceMode::InLaneShift )
   {
-    result.trajectory.label = "driving mission (in-lane obstacle avoidance)";
+    result.trajectory.label = "driving mission (avoiding obstacle)";
   }
   else if( result.mode == ObstacleAvoidanceMode::OvertakeLeft )
   {
-    result.trajectory.label = "driving mission (obstacle avoidance left)";
+    result.trajectory.label = "driving mission (avoiding obstacle left)";
   }
   else
   {
-    result.trajectory.label = "driving mission (obstacle avoidance right)";
+    result.trajectory.label = "driving mission (avoiding obstacle right)";
   }
 
   result.success = true;
@@ -1138,8 +1146,7 @@ try_plan_ego_lane_oncoming_stop( TrajectoryPlanner& planner,
   {
   }
 
-  result.trajectory.label =
-    "driving mission (waiting: oncoming vehicle on ego lane)";
+  result.trajectory.label = "driving mission (waiting for oncoming)";
 
   result.success = true;
   return result;

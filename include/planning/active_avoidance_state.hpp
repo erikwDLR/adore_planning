@@ -33,10 +33,11 @@ struct ActiveAvoidanceState
   // braking/waiting stop profiles are built on copies so the maneuver can
   // continue once a transient conflict clears.
   map::Route base_modified_route;
-  map::Route modified_route;
 
-  int obstacle_id = -1;
-  std::vector<int> obstacle_ids;
+  // Fixed geometric reference frame in which every persistent obstacle hull
+  // and shift contribution is expressed. Live traffic-light and weather speed
+  // overlays may change, but active replans must not silently switch this frame.
+  map::Route mission_route_baseline;
 
   double shift_start_s = 0.0;
   double shift_end_s = 0.0;
@@ -46,29 +47,22 @@ struct ActiveAvoidanceState
   // reaches its maximum here (ramp-up ends, plateau begins), so it is used as
   // the turn-indicator cutoff. Infinity until a maneuver populates it.
   double obstacle_s_min = std::numeric_limits<double>::infinity();
-  // Trailing edge of the committed obstacle span. With obstacle_s_min and
-  // lateral_shift it reconstructs the committed shift as a synthetic "hold" region
-  // on a replan, so the maneuver keeps its shift geometrically (no obstacle-id
-  // memory) even if perception drops the object mid-shift.
-  double obstacle_s_max = -std::numeric_limits<double>::infinity();
-
   double lateral_shift = 0.0;
+  double avoidance_speed = 0.0;
   bool in_lane = false;
+
+  // Persistent per-object shift contributions of the active maneuver, ordered by
+  // object_s_min. Committed contributions stay frozen; a newly appearing object that
+  // intrudes the corridor on the modified route is appended so the modified
+  // route is rebuilt as each object's own curve -- no artificial hold, earlier
+  // objects' shapes untouched.
+  std::vector<AvoidanceShiftContribution> committed_contributions;
 
   ObstacleAvoidanceManeuver maneuver;
 
-  // Commit latch. Set once ego has physically begun the lateral shift
-  // (ego_s_modified >= shift_start_s). From then on the maneuver is driven to its
-  // release point and a disappearing obstacle no longer snaps ego back to the
-  // original line; the vehicle detects present objects directly, so a lost
-  // detection mid-shift is bridged by finishing the committed maneuver rather
-  // than by any obstacle memory. Sticky: only reset() clears it, so a dynamic
-  // replan that moves shift_start_s cannot un-commit an in-progress maneuver.
-  bool committed = false;
-
   // Oncoming-wait latch. Once the opposite-lane monitor decides to stop for an
   // oncoming participant, hold that stop until the participant has cleared the
-  // conflict interval (or vanished for a hold time), instead of re-deciding
+  // conflict interval (or vanished), instead of re-deciding
   // go/stop every cycle. Re-deciding each cycle near the decision boundary makes
   // ego oscillate between braking and creeping while it waits. oncoming_wait_release_s
   // is the near edge (conflict_start_s) of the opposite-lane conflict interval; the
@@ -100,22 +94,20 @@ struct ActiveAvoidanceState
   {
     active = false;
     base_modified_route = map::Route{};
-    modified_route = map::Route{};
-
-    obstacle_id = -1;
-    obstacle_ids.clear();
+    mission_route_baseline = map::Route{};
 
     shift_start_s = 0.0;
     shift_end_s = 0.0;
     release_s = 0.0;
     obstacle_s_min = std::numeric_limits<double>::infinity();
-    obstacle_s_max = -std::numeric_limits<double>::infinity();
 
     lateral_shift = 0.0;
+    avoidance_speed = 0.0;
     in_lane = false;
 
+    committed_contributions.clear();
+
     maneuver = ObstacleAvoidanceManeuver{};
-    committed = false;
 
     clear_oncoming_wait();
 

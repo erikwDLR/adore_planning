@@ -156,6 +156,11 @@ struct ObstacleAvoidanceParams
   // as moving in the opposite direction.
   double min_oncoming_route_speed = 1.0;
 
+  // Maximum plausible participant speed used only to retain enough participant
+  // data for the configured prediction horizon. This is not a classification
+  // threshold.
+  double max_expected_participant_speed = 20.0;
+
   // Time horizon for predicting participant trajectories. Limits lookahead.
   double prediction_time_horizon = 15.0;
 
@@ -164,6 +169,10 @@ struct ObstacleAvoidanceParams
 
   // Safety distance from ego footprint rear to oncoming vehicle front during conflict.
   double oncoming_safety_distance_rear = 5.0;
+
+  // Keep an oncoming wait latched across brief perception dropouts. Releasing
+  // immediately on one missing frame is unsafe with real tracker flicker.
+  double oncoming_detection_hold_time = 0.75;
 
   // ============================================================================
   // Internal/advanced ego-lane oncoming stop behavior.
@@ -447,8 +456,6 @@ struct ObstacleAvoidanceManeuver
 
   int obstacle_id = -1;
   std::vector<int> obstacle_ids;
-  double obstacle_s_min = std::numeric_limits<double>::infinity();
-  double obstacle_s_max = -std::numeric_limits<double>::infinity();
 
   double shift_start_s = 0.0;
   double shift_end_s = 0.0;
@@ -482,6 +489,27 @@ struct ObstacleAvoidanceMonitorResult
   std::string reason;
 };
 
+// Persistent per-object input to the lateral-shift composition. Besides the
+// monotone object hull, this stores the accepted signed shift and complete
+// ramp/plateau geometry. A later object therefore cannot reshape an earlier
+// object's curve by changing a global ramp parameter.
+struct AvoidanceShiftContribution
+{
+  std::vector<int> participant_ids;
+
+  double object_s_min = std::numeric_limits<double>::infinity();
+  double object_s_max = -std::numeric_limits<double>::infinity();
+  double object_l_min = std::numeric_limits<double>::infinity();
+  double object_l_max = -std::numeric_limits<double>::infinity();
+
+  bool has_persistent_profile = false;
+  double signed_shift = 0.0;
+  double ramp_start_s = std::numeric_limits<double>::infinity();
+  double full_shift_start_s = std::numeric_limits<double>::infinity();
+  double full_shift_end_s = -std::numeric_limits<double>::infinity();
+  double ramp_end_s = -std::numeric_limits<double>::infinity();
+};
+
 struct ObstacleAvoidanceResult
 {
   bool success = false;
@@ -496,13 +524,19 @@ struct ObstacleAvoidanceResult
   int obstacle_id = -1;
   std::vector<int> obstacle_ids;
   double obstacle_s_min = std::numeric_limits<double>::infinity();
-  double obstacle_s_max = -std::numeric_limits<double>::infinity();
 
   double shift_start_s = 0.0;
   double shift_end_s = 0.0;
 
   double lateral_shift = 0.0;
+  double avoidance_speed = 0.0;
   bool in_lane = false;
+
+  // Per-object frozen shift inputs of the selected maneuver, ordered by
+  // object_s_min. Threaded into ActiveAvoidanceState so the persistent maneuver can
+  // rebuild the modified route from each object's own curve, instead of
+  // reconstructing a single merged span.
+  std::vector<AvoidanceShiftContribution> shift_contributions;
 
   ObstacleAvoidanceManeuver maneuver;
 };
@@ -644,20 +678,21 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                              const dynamics::VehicleStateDynamic& ego,
                              const dynamics::TrafficParticipantSet& traffic_participants,
                              const ObstacleAvoidanceParams& params = {},
-                             const std::vector<int>* additional_ignored_participant_ids = nullptr,
                              // When non-zero, restrict the shift to this lateral
                              // direction (+left / -right). Used by a mid-maneuver
                              // extension so it only ever widens the current side.
                              double shift_direction_sign = 0.0,
-                             // Committed shift to hold across a mid-maneuver replan
-                             // (its route s-span + signed magnitude). Rebuilt as a
-                             // synthetic "hold" obstacle so the maneuver keeps its
-                             // shift id-independently -- even if perception drops the
-                             // real object -- and the new object bridges smoothly onto
-                             // it. Default (inf/-inf/0) = no hold (initial plan).
-                             double held_shift_s_min = std::numeric_limits<double>::infinity(),
-                             double held_shift_s_max = -std::numeric_limits<double>::infinity(),
-                             double held_lateral_shift = 0.0 );
+                             // Frozen obstacle hulls already accepted for an active
+                             // maneuver. They are expressed in the mission-route
+                             // frame and are composed again from that fixed baseline.
+                             const std::vector<AvoidanceShiftContribution>*
+                               committed_contributions = nullptr,
+                             // Static participants selected by the corridor check
+                             // on the currently driven modified route. They must be
+                             // included even when they do not intersect the original
+                             // mission-route trigger corridor.
+                             const std::vector<int>*
+                               forced_participant_ids = nullptr );
 
 // Effective lateral-shift entry-ramp length: the distance to the obstacle,
 // floored at the ego front overhang (below it the front reaches the obstacle

@@ -5,11 +5,11 @@
  ********************************************************************************/
 
 // Static-obstacle detection: participant classification (static / slow-oncoming /
-// opposite-heading), per-obstacle route-frame envelopes, and selection of the
-// single nearest static obstacle reaching into the ego corridor ahead. No
-// clustering -- a further obstacle is handled cyclically from the driven route by
-// the active-maneuver corridor check. Depends on the geometry and projection
-// helpers in oa_detail.
+// opposite-heading), per-obstacle route-frame envelopes, and collection of every
+// relevant corridor intrusion for this planning cycle. Further or newly revealed
+// objects are added cyclically from the driven-route corridor check without
+// distance-based clustering. Depends on the geometry and projection helpers in
+// oa_detail.
 
 #include "obstacle_avoidance_internal.hpp"
 
@@ -148,8 +148,8 @@ make_avoidance_group_from_obstacles( std::vector<ObstacleEnvelope> obstacles )
     } );
 
   ObstacleEnvelope envelope;
-  // Prefer a real participant id for the group id: a synthetic "hold" obstacle carries
-  // id -1 and may sort first, but the group should still be identified by a real object.
+  // Prefer a real participant id for the group id. A frozen hull can be
+  // id-independent, but the group should still use a real id when available.
   envelope.id = obstacles.front().id;
   for( const auto& obstacle : obstacles )
   {
@@ -211,10 +211,8 @@ find_static_obstacle_group_on_route(
   const dynamics::TrafficParticipantSet& traffic_participants,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params,
-  const std::vector<int>* ignored_participant_ids,
-  double held_shift_s_min,
-  double held_shift_s_max,
-  double held_lateral_shift )
+  const std::vector<AvoidanceShiftContribution>* committed_contributions,
+  const std::vector<int>* forced_participant_ids )
 {
   const double ego_s = project_s_on_reference_line( route, ego );
   if( !std::isfinite( ego_s ) )
@@ -230,13 +228,190 @@ find_static_obstacle_group_on_route(
 
   std::vector<ObstacleEnvelope> obstacles;
 
+  // Start with the frozen hulls of the active maneuver. They are already in the
+  // mission-route frame, so rebuilding from them cannot stack a shift on top of
+  // the previously modified route. A later observation may only expand one of
+  // these hulls; disappearance or tracker jitter never shrinks it.
+  if( committed_contributions != nullptr )
+  {
+    obstacles.reserve(
+      committed_contributions->size() +
+      traffic_participants.participants.size() );
+
+    for( const auto& contribution : *committed_contributions )
+    {
+      if( !std::isfinite( contribution.object_s_min ) ||
+          !std::isfinite( contribution.object_s_max ) ||
+          !std::isfinite( contribution.object_l_min ) ||
+          !std::isfinite( contribution.object_l_max ) ||
+          contribution.object_s_max < contribution.object_s_min ||
+          contribution.object_l_max < contribution.object_l_min )
+      {
+        continue;
+      }
+
+      ObstacleEnvelope frozen;
+      frozen.id =
+        contribution.participant_ids.empty()
+          ? -1
+          : contribution.participant_ids.front();
+      frozen.participant_ids = contribution.participant_ids;
+      frozen.object_s_min = contribution.object_s_min;
+      frozen.object_s_max = contribution.object_s_max;
+      frozen.object_l_min = contribution.object_l_min;
+      frozen.object_l_max = contribution.object_l_max;
+      frozen.s_min = frozen.object_s_min;
+      frozen.s_max = frozen.object_s_max;
+      frozen.l_min = frozen.object_l_min;
+      frozen.l_max = frozen.object_l_max;
+      frozen.center_s = 0.5 * ( frozen.s_min + frozen.s_max );
+      frozen.center_l = 0.5 * ( frozen.l_min + frozen.l_max );
+      frozen.overlaps_ego_corridor = true;
+      frozen.committed_hold = true;
+
+      const bool valid_profile =
+        contribution.has_persistent_profile &&
+        std::isfinite( contribution.signed_shift ) &&
+        std::isfinite( contribution.ramp_start_s ) &&
+        std::isfinite( contribution.full_shift_start_s ) &&
+        std::isfinite( contribution.full_shift_end_s ) &&
+        std::isfinite( contribution.ramp_end_s ) &&
+        contribution.ramp_start_s <= contribution.full_shift_start_s &&
+        contribution.full_shift_start_s <= contribution.full_shift_end_s &&
+        contribution.full_shift_end_s <= contribution.ramp_end_s;
+      if( valid_profile )
+      {
+        frozen.has_persistent_profile = true;
+        frozen.persistent_signed_shift = contribution.signed_shift;
+        frozen.persistent_ramp_start_s = contribution.ramp_start_s;
+        frozen.persistent_full_shift_start_s =
+          contribution.full_shift_start_s;
+        frozen.persistent_full_shift_end_s =
+          contribution.full_shift_end_s;
+        frozen.persistent_ramp_end_s = contribution.ramp_end_s;
+      }
+
+      obstacles.push_back( std::move( frozen ) );
+    }
+  }
+
+  const auto merge_observation =
+    [&]( ObstacleEnvelope observation, bool forced_from_driven_corridor )
+    {
+      auto existing_it =
+        std::find_if(
+          obstacles.begin(),
+          obstacles.end(),
+          [&]( const ObstacleEnvelope& existing )
+          {
+            return std::any_of(
+              observation.participant_ids.begin(),
+              observation.participant_ids.end(),
+              [&]( int id )
+              {
+                return contains_participant_id(
+                  existing.participant_ids, id );
+              } );
+          } );
+
+      if( existing_it == obstacles.end() )
+      {
+        obstacles.push_back( std::move( observation ) );
+        return;
+      }
+
+      existing_it->object_s_min =
+        std::min( existing_it->object_s_min, observation.object_s_min );
+      existing_it->object_s_max =
+        std::max( existing_it->object_s_max, observation.object_s_max );
+      existing_it->object_l_min =
+        std::min( existing_it->object_l_min, observation.object_l_min );
+      existing_it->object_l_max =
+        std::max( existing_it->object_l_max, observation.object_l_max );
+      for( const int id : observation.participant_ids )
+      {
+        if( !contains_participant_id( existing_it->participant_ids, id ) )
+        {
+          existing_it->participant_ids.push_back( id );
+        }
+      }
+      existing_it->s_min = existing_it->object_s_min;
+      existing_it->s_max = existing_it->object_s_max;
+      existing_it->l_min = existing_it->object_l_min;
+      existing_it->l_max = existing_it->object_l_max;
+      existing_it->center_s =
+        0.5 * ( existing_it->s_min + existing_it->s_max );
+      existing_it->center_l =
+        0.5 * ( existing_it->l_min + existing_it->l_max );
+      existing_it->overlaps_ego_corridor = true;
+
+      if( existing_it->has_persistent_profile )
+      {
+        const double ego_front_offset =
+          ego_params.wheelbase + ego_params.front_axle_to_front_border;
+        const double ego_rear_offset =
+          ego_params.rear_border_to_rear_axle;
+        const double expanded_full_start =
+          existing_it->object_s_min - ego_front_offset;
+        const double expanded_full_end =
+          existing_it->object_s_max + ego_rear_offset;
+        const double expanded_ramp_start =
+          std::max(
+            0.0,
+            expanded_full_start -
+              std::max( 0.0, params.front_clearance ) );
+        const double expanded_ramp_end =
+          expanded_full_end + std::max( 0.0, params.rear_clearance );
+
+        existing_it->persistent_full_shift_start_s =
+          std::min(
+            existing_it->persistent_full_shift_start_s,
+            expanded_full_start );
+        existing_it->persistent_full_shift_end_s =
+          std::max(
+            existing_it->persistent_full_shift_end_s,
+            expanded_full_end );
+        existing_it->persistent_ramp_start_s =
+          std::min(
+            existing_it->persistent_ramp_start_s,
+            expanded_ramp_start );
+        existing_it->persistent_ramp_end_s =
+          std::max(
+            existing_it->persistent_ramp_end_s,
+            expanded_ramp_end );
+      }
+
+      if( forced_from_driven_corridor )
+      {
+        // This hull invalidated the currently driven route and therefore must
+        // be validated again from ego's live pose.
+        existing_it->committed_hold = false;
+      }
+    };
+
   for( const auto& [id, participant] : traffic_participants.participants )
   {
-    // Skip obstacles already handled by an active maneuver (e.g. the one ego is
-    // currently passing): detection must lock onto the genuinely new obstacle,
-    // not re-target a participant the caller is already avoiding.
-    if( ignored_participant_ids != nullptr &&
-        contains_participant_id( *ignored_participant_ids, static_cast<int>( id ) ) )
+    const int participant_id = static_cast<int>( id );
+    const bool forced_from_driven_corridor =
+      forced_participant_ids != nullptr &&
+      contains_participant_id(
+        *forced_participant_ids, participant_id );
+    const bool updates_committed_hull =
+      std::any_of(
+        obstacles.begin(),
+        obstacles.end(),
+        [&]( const ObstacleEnvelope& obstacle )
+        {
+          return contains_participant_id(
+            obstacle.participant_ids, participant_id );
+        } );
+
+    // During an active maneuver, membership comes exclusively from the corridor
+    // of the route ego actually drives. Other mission-corridor objects are not
+    // added merely because a different object triggered this replan.
+    if( committed_contributions != nullptr &&
+        !forced_from_driven_corridor &&
+        !updates_committed_hull )
     {
       continue;
     }
@@ -260,13 +435,25 @@ find_static_obstacle_group_on_route(
     }
 
     ObstacleEnvelope env;
-    env.id = static_cast<int>( id );
+    env.id = participant_id;
     env.participant_ids.push_back( env.id );
+
+    auto projection_params = params;
+    if( forced_from_driven_corridor )
+    {
+      // The driven route may legitimately be several metres away from the
+      // mission centerline. The modified-route corridor check already proved
+      // relevance, so mission-frame plausibility limits must not discard this
+      // object during the coordinate conversion.
+      projection_params.max_projection_distance_from_route = 0.0;
+      projection_params.max_object_lateral_distance =
+        std::numeric_limits<double>::infinity();
+    }
 
     if( !project_obstacle_to_route_analytic(
           route,
           participant,
-          params,
+          projection_params,
           ego_s,
           ego_half_width,
           env ) )
@@ -285,7 +472,9 @@ find_static_obstacle_group_on_route(
     // into the actual ego (trigger) corridor; otherwise they are oncoming /
     // other-lane traffic handled by the oncoming logic, not the static shift.
     // Secondary (non-trigger) obstacles are therefore never opposite-heading.
-    if( opposite_heading && !env.overlaps_ego_corridor )
+    if( opposite_heading &&
+        !env.overlaps_ego_corridor &&
+        !forced_from_driven_corridor )
     {
       continue;
     }
@@ -304,76 +493,24 @@ find_static_obstacle_group_on_route(
     // Only obstacles that actually reach into the ego corridor drive a maneuver.
     // Every one of them is carried (see below); objects outside the corridor are
     // not collected now that clustering / secondary inclusion are gone.
-    if( !env.overlaps_ego_corridor )
+    if( !env.overlaps_ego_corridor &&
+        !forced_from_driven_corridor )
     {
       continue;
     }
 
-    obstacles.push_back( env );
-  }
-
-  const bool have_committed_hold =
-    std::isfinite( held_shift_s_min ) && std::isfinite( held_shift_s_max ) &&
-    held_shift_s_max > held_shift_s_min &&
-    std::fabs( held_lateral_shift ) > 1e-3;
-
-  // Mark every real obstacle overlapping the committed hold span as belonging to the
-  // maneuver ego is already executing, so its clearance is not re-validated from ego's
-  // transient turn-in pose (where the object ego is currently passing spuriously fails
-  // even though the committed route clears it). Geometric and id-independent: it is the
-  // committed span, not an obstacle id, that decides what ego is currently passing.
-  if( have_committed_hold )
-  {
-    for( auto& env : obstacles )
-    {
-      if( env.object_s_min <= held_shift_s_max &&
-          env.object_s_max >= held_shift_s_min )
-      {
-        env.committed_hold = true;
-      }
-    }
-  }
-
-  // Reconstruct the committed shift as a synthetic "hold" obstacle so a mid-maneuver
-  // replan keeps ego at (at least) its committed offset over the committed span, and
-  // the per-object bridge extends that shift smoothly into any newly detected object
-  // instead of dipping back toward the lane between them. This is the maneuver's own
-  // geometry (its s-span + lateral_shift, passed in by the caller from the active
-  // state), NOT an obstacle-id memory: it holds even when perception drops the real
-  // object mid-shift, and it is id-independent -- detection is purely geometric.
-  if( have_committed_hold )
-  {
-    const double side_clearance = std::max( 0.0, params.side_clearance );
-
-    ObstacleEnvelope held;
-    held.object_s_min = held_shift_s_min;
-    held.object_s_max = held_shift_s_max;
-    // Back-compute the obstacle edge so required_signed_shift_for_obstacle reproduces
-    // exactly held_lateral_shift (a thin hull on the far side of that edge).
-    if( held_lateral_shift > 0.0 )
-    {
-      held.object_l_max = held_lateral_shift - side_clearance - ego_half_width;
-      held.object_l_min = held.object_l_max - 0.1;
-    }
-    else
-    {
-      held.object_l_min = held_lateral_shift + side_clearance + ego_half_width;
-      held.object_l_max = held.object_l_min + 0.1;
-    }
-    held.s_min = held.object_s_min;
-    held.s_max = held.object_s_max;
-    held.l_min = held.object_l_min;
-    held.l_max = held.object_l_max;
-    held.center_s = 0.5 * ( held.s_min + held.s_max );
-    held.center_l = 0.5 * ( held.l_min + held.l_max );
-    held.overlaps_ego_corridor = true;
-    held.committed_hold = true;
-    obstacles.push_back( held );
+    // A forced object was selected against the driven modified route. In the
+    // mission frame it can sit outside the original trigger corridor; marking it
+    // relevant makes candidate generation compute the absolute shift needed to
+    // clear that hull from the fixed mission baseline.
+    env.overlaps_ego_corridor = true;
+    merge_observation(
+      std::move( env ), forced_from_driven_corridor );
   }
 
   if( obstacles.empty() )
   {
-    // Nothing intrudes into the ego corridor and no committed shift to hold.
+    // Nothing intrudes into the ego corridor and no frozen hull remains.
     return std::nullopt;
   }
 

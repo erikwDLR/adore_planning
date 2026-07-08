@@ -120,6 +120,16 @@ struct ObstacleEnvelope
 
   bool overlaps_ego_corridor = false;
 
+  // Accepted curve of a persistent contribution. New observations may expand
+  // these bounds conservatively but a replan may never replace them with a
+  // shorter/new global ramp.
+  bool has_persistent_profile = false;
+  double persistent_signed_shift = 0.0;
+  double persistent_ramp_start_s = std::numeric_limits<double>::infinity();
+  double persistent_full_shift_start_s = std::numeric_limits<double>::infinity();
+  double persistent_full_shift_end_s = -std::numeric_limits<double>::infinity();
+  double persistent_ramp_end_s = -std::numeric_limits<double>::infinity();
+
   // Belongs to the maneuver ego is already executing (its span overlaps the committed
   // hold region). Its clearance is not re-validated from ego's transient turn-in pose,
   // where the object ego is currently passing spuriously fails. Set geometrically in
@@ -169,11 +179,9 @@ project_participant_footprint_to_route(
 // Static-obstacle detection / clustering (obstacle_avoidance_grouping.cpp)
 // ---------------------------------------------------------------------------
 
-// A single static obstacle to avoid. Retained as a thin carrier (obstacles holds
-// exactly the one trigger obstacle, envelope mirrors it) so the shift / candidate /
-// oncoming helpers keep their existing interface. Multi-obstacle clustering was
-// removed: a further obstacle is handled cyclically from the driven route, not
-// pre-merged here.
+// Obstacles selected for one planning cycle. Their individual hulls and
+// persistent profiles remain separate; envelope is only their coarse union for
+// search bounds, ids and diagnostics.
 struct AvoidanceGroup
 {
   std::vector<ObstacleEnvelope> obstacles;
@@ -213,10 +221,9 @@ find_static_obstacle_group_on_route(
   const dynamics::TrafficParticipantSet& traffic_participants,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params,
-  const std::vector<int>* ignored_participant_ids = nullptr,
-  double held_shift_s_min = std::numeric_limits<double>::infinity(),
-  double held_shift_s_max = -std::numeric_limits<double>::infinity(),
-  double held_lateral_shift = 0.0 );
+  const std::vector<AvoidanceShiftContribution>*
+    committed_contributions = nullptr,
+  const std::vector<int>* forced_participant_ids = nullptr );
 
 // ---------------------------------------------------------------------------
 // Lateral-shift profile math + modified-route construction (obstacle_avoidance_shift.cpp)

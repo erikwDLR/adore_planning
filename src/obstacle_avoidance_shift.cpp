@@ -56,13 +56,25 @@ avoidance_shift_alpha_at_s( double s,
     ego_params.wheelbase + ego_params.front_axle_to_front_border;
   const double ego_rear_offset = ego_params.rear_border_to_rear_axle;
 
-  const double hold_start_s = obstacle.object_s_min - ego_front_offset;
-  const double hold_end_s   = obstacle.object_s_max + ego_rear_offset;
+  const double hold_start_s =
+    obstacle.has_persistent_profile
+      ? obstacle.persistent_full_shift_start_s
+      : obstacle.object_s_min - ego_front_offset;
+  const double hold_end_s =
+    obstacle.has_persistent_profile
+      ? obstacle.persistent_full_shift_end_s
+      : obstacle.object_s_max + ego_rear_offset;
 
   const double shift_start_s =
-    std::max( 0.0, hold_start_s - std::max( 0.0, params.front_clearance ) );
+    obstacle.has_persistent_profile
+      ? obstacle.persistent_ramp_start_s
+      : std::max(
+          0.0,
+          hold_start_s - std::max( 0.0, params.front_clearance ) );
   const double shift_end_s =
-    hold_end_s + std::max( 0.0, params.rear_clearance );
+    obstacle.has_persistent_profile
+      ? obstacle.persistent_ramp_end_s
+      : hold_end_s + std::max( 0.0, params.rear_clearance );
 
   if( s < shift_start_s || s > shift_end_s )
   {
@@ -106,12 +118,30 @@ required_signed_shift_for_obstacle(
   {
     const double required =
       obstacle.object_l_max + side_clearance + ego_half_width;
-    return std::clamp( required, 0.0, nominal_lateral_shift );
+    const double geometric_shift =
+      std::clamp( required, 0.0, nominal_lateral_shift );
+    if( obstacle.has_persistent_profile &&
+        obstacle.persistent_signed_shift > 0.0 )
+    {
+      return choose_larger_magnitude_shift(
+        geometric_shift,
+        obstacle.persistent_signed_shift );
+    }
+    return geometric_shift;
   }
 
   const double required =
     obstacle.object_l_min - side_clearance - ego_half_width;
-  return std::clamp( required, nominal_lateral_shift, 0.0 );
+  const double geometric_shift =
+    std::clamp( required, nominal_lateral_shift, 0.0 );
+  if( obstacle.has_persistent_profile &&
+      obstacle.persistent_signed_shift < 0.0 )
+  {
+    return choose_larger_magnitude_shift(
+      geometric_shift,
+      obstacle.persistent_signed_shift );
+  }
+  return geometric_shift;
 }
 
 double
@@ -244,14 +274,36 @@ build_modified_avoidance_route( const map::Route& route,
   const double ego_front_offset =
     ego_params.wheelbase + ego_params.front_axle_to_front_border;
   const double ego_rear_offset = ego_params.rear_border_to_rear_axle;
-  const double shift_start_s =
-    std::max(
-      0.0,
-      group.envelope.object_s_min - ego_front_offset -
-        std::max( 0.0, params.front_clearance ) );
-  const double shift_end_s =
-    group.envelope.object_s_max + ego_rear_offset +
-    std::max( 0.0, params.rear_clearance );
+  double shift_start_s = std::numeric_limits<double>::infinity();
+  double shift_end_s = -std::numeric_limits<double>::infinity();
+  for( const auto& obstacle : group.obstacles )
+  {
+    const double full_start_s =
+      obstacle.has_persistent_profile
+        ? obstacle.persistent_full_shift_start_s
+        : obstacle.object_s_min - ego_front_offset;
+    const double full_end_s =
+      obstacle.has_persistent_profile
+        ? obstacle.persistent_full_shift_end_s
+        : obstacle.object_s_max + ego_rear_offset;
+    const double obstacle_shift_start_s =
+      obstacle.has_persistent_profile
+        ? obstacle.persistent_ramp_start_s
+        : std::max(
+            0.0,
+            full_start_s - std::max( 0.0, params.front_clearance ) );
+    const double obstacle_shift_end_s =
+      obstacle.has_persistent_profile
+        ? obstacle.persistent_ramp_end_s
+        : full_end_s + std::max( 0.0, params.rear_clearance );
+    shift_start_s = std::min( shift_start_s, obstacle_shift_start_s );
+    shift_end_s = std::max( shift_end_s, obstacle_shift_end_s );
+  }
+
+  if( !std::isfinite( shift_start_s ) || !std::isfinite( shift_end_s ) )
+  {
+    return modified_route;
+  }
   apply_avoidance_speed_profile(
     modified_route,
     ego_s,

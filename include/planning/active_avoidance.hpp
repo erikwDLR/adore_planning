@@ -26,13 +26,23 @@ namespace planner
 // so the maneuver lifecycle can be unit-tested; the decision-maker node owns the
 // ActiveAvoidanceState instance and calls these.
 
-// Initialise the active maneuver state from a planned avoidance result. Leaves
-// the commit latch untouched so an in-progress shift stays committed across a
-// dynamic replan.
+// Initialise or refresh the persistent active maneuver state from a planned
+// avoidance result.
 void
 start_active_avoidance_state(
   ActiveAvoidanceState& state,
-  const ObstacleAvoidanceResult& oa_result );
+  const ObstacleAvoidanceResult& oa_result,
+  const map::Route& mission_route_baseline );
+
+// Compare only route geometry, not speed overlays. Active obstacle hulls use
+// route-s coordinates and therefore remain valid only while this geometric
+// reference frame stays compatible.
+bool
+routes_have_compatible_geometry(
+  const map::Route& baseline,
+  const map::Route& candidate,
+  double position_tolerance = 0.5,
+  double length_tolerance = 1.0 );
 
 // Monotonic-progression plausibility for the ego projection onto the active
 // modified route. Enforces no-backward motion and rejects implausible forward

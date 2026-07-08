@@ -34,35 +34,94 @@ constexpr double MAX_PLAUSIBLE_MODIFIED_S_JUMP = 2.0;
 void
 start_active_avoidance_state(
     ActiveAvoidanceState& state,
-    const planner::ObstacleAvoidanceResult& oa_result )
+    const planner::ObstacleAvoidanceResult& oa_result,
+    const map::Route& mission_route_baseline )
 {
     state.active = true;
     state.base_modified_route = oa_result.modified_route;
-    state.modified_route = oa_result.modified_route;
-
-    state.obstacle_id = oa_result.obstacle_id;
-    state.obstacle_ids = oa_result.obstacle_ids;
+    state.mission_route_baseline = mission_route_baseline;
 
     state.shift_start_s = oa_result.shift_start_s;
     state.shift_end_s = oa_result.shift_end_s;
     state.release_s = oa_result.shift_end_s;
     state.obstacle_s_min = oa_result.obstacle_s_min;
-    state.obstacle_s_max = oa_result.obstacle_s_max;
 
     state.lateral_shift = oa_result.lateral_shift;
+    state.avoidance_speed = oa_result.avoidance_speed;
     state.in_lane = oa_result.in_lane;
+
+    // Persist the monotone per-object hull union used to rebuild the active
+    // modified route from the fixed mission-route frame.
+    state.committed_contributions = oa_result.shift_contributions;
+
     state.maneuver = oa_result.maneuver;
 
     state.last_modified_s = std::numeric_limits<double>::quiet_NaN();
     state.last_modified_time = std::numeric_limits<double>::quiet_NaN();
 
-    // The commit latch is intentionally left untouched here: it is already false
-    // from the reset() that precedes a fresh maneuver, and it must be preserved
-    // across a dynamic replan so an in-progress shift stays committed even when
-    // the replan moves shift_start_s.
-    //
     // A freshly (re)committed maneuver supersedes any prior oncoming-wait hold.
     state.clear_oncoming_wait();
+}
+
+bool
+routes_have_compatible_geometry(
+    const map::Route& baseline,
+    const map::Route& candidate,
+    double position_tolerance,
+    double length_tolerance )
+{
+    if( baseline.reference_line.size() < 2 ||
+        candidate.reference_line.size() < 2 )
+    {
+        return false;
+    }
+
+    position_tolerance = std::max( 0.0, position_tolerance );
+    length_tolerance = std::max( 0.0, length_tolerance );
+
+    const double baseline_first_s = baseline.reference_line.begin()->first;
+    const double baseline_last_s = baseline.reference_line.rbegin()->first;
+    const double candidate_first_s = candidate.reference_line.begin()->first;
+    const double candidate_last_s = candidate.reference_line.rbegin()->first;
+    const double baseline_length = baseline_last_s - baseline_first_s;
+    const double candidate_length = candidate_last_s - candidate_first_s;
+
+    if( !std::isfinite( baseline_length ) ||
+        !std::isfinite( candidate_length ) ||
+        baseline_length <= 0.0 ||
+        candidate_length <= 0.0 ||
+        std::fabs( baseline_length - candidate_length ) > length_tolerance )
+    {
+        return false;
+    }
+
+    // Normalized sampling tolerates harmless re-sampling while still detecting
+    // a genuinely different mission geometry with the same destination.
+    constexpr int sample_count = 20;
+    for( int i = 0; i <= sample_count; ++i )
+    {
+        const double alpha =
+            static_cast<double>( i ) / static_cast<double>( sample_count );
+        const double baseline_s =
+            baseline_first_s + alpha * baseline_length;
+        const double candidate_s =
+            candidate_first_s + alpha * candidate_length;
+        const auto baseline_pose = baseline.get_pose_at_s( baseline_s );
+        const auto candidate_pose = candidate.get_pose_at_s( candidate_s );
+
+        if( !std::isfinite( baseline_pose.x ) ||
+            !std::isfinite( baseline_pose.y ) ||
+            !std::isfinite( candidate_pose.x ) ||
+            !std::isfinite( candidate_pose.y ) ||
+            std::hypot(
+                baseline_pose.x - candidate_pose.x,
+                baseline_pose.y - candidate_pose.y ) > position_tolerance )
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 // Build a RouteCorridorConflict from an active opposite-lane monitor result so

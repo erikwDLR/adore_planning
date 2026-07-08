@@ -361,7 +361,13 @@ avoidance_speed_for_shift( double ramp_length,
       std::sqrt( accel / ( 6.0 * std::fabs( shift_magnitude ) ) );
     speed = std::min( speed, comfort_speed );
   }
-  return std::max( speed, std::max( 0.0, params.min_avoidance_speed ) );
+  const double upper_speed =
+    std::max( 0.0, params.max_speed_during_avoidance );
+  const double lower_speed =
+    std::min(
+      upper_speed,
+      std::max( 0.0, params.min_avoidance_speed ) );
+  return std::clamp( speed, lower_speed, upper_speed );
 }
 
 ObstacleAvoidanceResult
@@ -370,29 +376,26 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
                              const dynamics::VehicleStateDynamic& ego,
                              const dynamics::TrafficParticipantSet& traffic_participants,
                              const ObstacleAvoidanceParams& params,
-                             const std::vector<int>* additional_ignored_participant_ids,
                              double shift_direction_sign,
-                             double held_shift_s_min,
-                             double held_shift_s_max,
-                             double held_lateral_shift )
+                             const std::vector<AvoidanceShiftContribution>*
+                               committed_contributions,
+                             const std::vector<int>*
+                               forced_participant_ids )
 {
   ObstacleAvoidanceResult result;
   result.modified_route = route;
 
-  // Find nearest relevant static obstacle group on route. During a dynamic
-  // replan the obstacles already handled by the active maneuver are passed as
-  // ignored so detection locks onto the genuinely new obstacle rather than the
-  // one ego is currently passing.
+  // Find relevant static obstacles on the fixed mission-route frame. During a
+  // dynamic replan, accepted contributions are restored first and only
+  // driven-corridor intrusions are allowed to join them.
   const auto obstacle_group = find_static_obstacle_group_on_route(
     route,
     ego,
     traffic_participants,
     planner.get_physical_vehicle_parameters(),
     params,
-    additional_ignored_participant_ids,
-    held_shift_s_min,
-    held_shift_s_max,
-    held_lateral_shift );
+    committed_contributions,
+    forced_participant_ids );
 
   if( !obstacle_group.has_value() )
   {
@@ -577,16 +580,6 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
 
   std::vector<int> ignored_participant_ids =
     obstacle_group->envelope.participant_ids;
-  if( additional_ignored_participant_ids != nullptr )
-  {
-    for( const int participant_id : *additional_ignored_participant_ids )
-    {
-      if( !contains_participant_id( ignored_participant_ids, participant_id ) )
-      {
-        ignored_participant_ids.push_back( participant_id );
-      }
-    }
-  }
 
   std::vector<RouteShiftPlanCandidate> accepted_candidates;
 
@@ -866,16 +859,42 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
           &candidate.trajectory,
           &ignored_participant_ids );
 
-      const bool ignore_other_lane_oncoming =
-        candidate.shift_candidate.type == AvoidanceCandidateType::InLane &&
-        candidate_route_safety.has_conflict &&
-        is_oncoming_other_lane_conflict(
-          candidate_route_safety.conflict,
-          vehicle_params,
-          candidate.params );
+      const auto is_ignorable_other_lane_oncoming =
+        [&]( const RouteCorridorConflict& conflict )
+        {
+          return
+            candidate.shift_candidate.type ==
+              AvoidanceCandidateType::InLane &&
+            is_oncoming_other_lane_conflict(
+              conflict,
+              vehicle_params,
+              candidate.params );
+        };
 
-      if( ( candidate_route_safety.has_conflict || !candidate_route_safety.safe ) &&
-          !ignore_other_lane_oncoming )
+      bool has_relevant_route_conflict = false;
+      if( !candidate_route_safety.conflicts.empty() )
+      {
+        has_relevant_route_conflict =
+          std::any_of(
+            candidate_route_safety.conflicts.begin(),
+            candidate_route_safety.conflicts.end(),
+            [&]( const RouteCorridorConflict& conflict )
+            {
+              return !is_ignorable_other_lane_oncoming( conflict );
+            } );
+      }
+      else if( candidate_route_safety.has_conflict )
+      {
+        // Projection and other structural failures report a single conflict
+        // without populating the vector and must never be filtered away.
+        has_relevant_route_conflict =
+          !is_ignorable_other_lane_oncoming(
+            candidate_route_safety.conflict );
+      }
+
+      if( has_relevant_route_conflict ||
+          ( !candidate_route_safety.safe &&
+            !candidate_route_safety.has_conflict ) )
       {
         last_safety_rejection =
           describe_candidate_rejection(
@@ -1007,6 +1026,8 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
   result.mode = selected.mode;
   result.modified_route = selected.modified_route;
   result.lateral_shift = selected.shift_candidate.shift;
+  result.avoidance_speed =
+    selected.params.max_speed_during_avoidance;
   result.in_lane = selected.shift_candidate.in_lane;
   result.trajectory = selected.trajectory;
 
@@ -1041,6 +1062,60 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
   result.success = true;
   result.reason = "planned validated obstacle avoidance by selecting a route-shift candidate";
 
+  // Freeze the per-object shift inputs so the persistent maneuver can rebuild
+  // the modified route as each object's own curve. obstacle_group->obstacles is
+  // already ordered by object_s_min (find_static_obstacle_group_on_route), which the
+  // gap-bridging in avoidance_shift_offset_at_s relies on.
+  result.shift_contributions.clear();
+  result.shift_contributions.reserve( obstacle_group->obstacles.size() );
+  const double contribution_ego_front_offset =
+    vehicle_params.wheelbase + vehicle_params.front_axle_to_front_border;
+  const double contribution_ego_rear_offset =
+    vehicle_params.rear_border_to_rear_axle;
+  for( const auto& obstacle : obstacle_group->obstacles )
+  {
+    AvoidanceShiftContribution contribution;
+    contribution.participant_ids = obstacle.participant_ids;
+    contribution.object_s_min = obstacle.object_s_min;
+    contribution.object_s_max = obstacle.object_s_max;
+    contribution.object_l_min = obstacle.object_l_min;
+    contribution.object_l_max = obstacle.object_l_max;
+    contribution.has_persistent_profile = true;
+    contribution.signed_shift =
+      required_signed_shift_for_obstacle(
+        obstacle,
+        result.lateral_shift,
+        vehicle_params,
+        selected.params );
+
+    if( obstacle.has_persistent_profile )
+    {
+      contribution.ramp_start_s = obstacle.persistent_ramp_start_s;
+      contribution.full_shift_start_s =
+        obstacle.persistent_full_shift_start_s;
+      contribution.full_shift_end_s =
+        obstacle.persistent_full_shift_end_s;
+      contribution.ramp_end_s = obstacle.persistent_ramp_end_s;
+    }
+    else
+    {
+      contribution.full_shift_start_s =
+        obstacle.object_s_min - contribution_ego_front_offset;
+      contribution.full_shift_end_s =
+        obstacle.object_s_max + contribution_ego_rear_offset;
+      contribution.ramp_start_s =
+        std::max(
+          0.0,
+          contribution.full_shift_start_s -
+            std::max( 0.0, selected.params.front_clearance ) );
+      contribution.ramp_end_s =
+        contribution.full_shift_end_s +
+        std::max( 0.0, selected.params.rear_clearance );
+    }
+
+    result.shift_contributions.push_back( contribution );
+  }
+
   const auto route_diff_bounds =
     find_route_difference_bounds(
       route,
@@ -1066,14 +1141,11 @@ try_plan_obstacle_avoidance( TrajectoryPlanner& planner,
     result.obstacle_id = obstacle_group->envelope.id;
     result.obstacle_ids = obstacle_group->envelope.participant_ids;
     result.obstacle_s_min = obstacle_group->envelope.object_s_min;
-    result.obstacle_s_max = obstacle_group->envelope.object_s_max;
 
     result.maneuver.active = true;
     result.maneuver.mode = result.mode;
     result.maneuver.obstacle_id = result.obstacle_id;
     result.maneuver.obstacle_ids = result.obstacle_ids;
-    result.maneuver.obstacle_s_min = result.obstacle_s_min;
-    result.maneuver.obstacle_s_max = result.obstacle_s_max;
     result.maneuver.shift_start_s = result.shift_start_s;
     result.maneuver.shift_end_s = result.shift_end_s;
     result.maneuver.release_s = result.shift_end_s;

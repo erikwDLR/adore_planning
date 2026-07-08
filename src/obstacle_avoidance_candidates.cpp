@@ -149,7 +149,6 @@ make_candidate_from_obstacle_hulls(
     0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
   const bool shift_left = direction == ShiftDirection::Left;
   double required_shift = 0.0;
-  std::size_t hull_count = 0;
 
   for( const auto& obs : group.obstacles )
   {
@@ -158,16 +157,26 @@ make_candidate_from_obstacle_hulls(
       continue;
     }
 
-    const double required_for_obs =
+    double required_for_obs =
       shift_left
         ? obs.object_l_max + params.side_clearance + ego_half_width
         : obs.object_l_min - params.side_clearance - ego_half_width;
+
+    if( obs.has_persistent_profile &&
+        ( shift_left
+            ? obs.persistent_signed_shift > 0.0
+            : obs.persistent_signed_shift < 0.0 ) )
+    {
+      required_for_obs =
+        choose_larger_magnitude_shift(
+          required_for_obs,
+          obs.persistent_signed_shift );
+    }
 
     required_shift =
       shift_left
         ? std::max( required_shift, required_for_obs )
         : std::min( required_shift, required_for_obs );
-    ++hull_count;
   }
 
   return ShiftCandidate{
@@ -347,9 +356,12 @@ evaluate_shift_candidate( ShiftCandidate& candidate,
 
   if( !params.enforce_drivable_area )
   {
-    candidate.in_lane = false;
+    candidate.in_lane =
+      candidate.type == AvoidanceCandidateType::InLane;
 
-    if( ( candidate.type == AvoidanceCandidateType::AdjacentSameDirection &&
+    if( ( candidate.type == AvoidanceCandidateType::InLane &&
+          params.in_lane_shift_enabled ) ||
+        ( candidate.type == AvoidanceCandidateType::AdjacentSameDirection &&
           params.adjacent_lane_enabled ) ||
         ( candidate.type == AvoidanceCandidateType::OppositeDirection &&
           params.opposite_lane_enabled ) )

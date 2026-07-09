@@ -168,6 +168,118 @@ RouteSpeedPolicy::apply_avoidance_speed_profile(
 }
 
 map::Route
+RouteSpeedPolicy::apply_segmented_avoidance_speed_profile(
+  const map::Route& route,
+  double ego_s,
+  const std::vector<AvoidanceSpeedSegment>& segments,
+  const dynamics::PhysicalVehicleParameters& vehicle_params,
+  const ObstacleAvoidanceParams& params )
+{
+  map::Route profiled_route = route;
+
+  if( params.max_speed_during_avoidance <= 0.0 ||
+      !std::isfinite( ego_s ) ||
+      segments.empty() )
+  {
+    return profiled_route;
+  }
+
+  std::vector<AvoidanceSpeedSegment> merged_segments;
+  merged_segments.reserve( segments.size() );
+  for( const auto& segment : segments )
+  {
+    if( !std::isfinite( segment.start_s ) ||
+        !std::isfinite( segment.end_s ) )
+    {
+      continue;
+    }
+
+    AvoidanceSpeedSegment normalized = segment;
+    if( normalized.end_s < normalized.start_s )
+    {
+      std::swap( normalized.start_s, normalized.end_s );
+    }
+    merged_segments.push_back( normalized );
+  }
+
+  if( merged_segments.empty() )
+  {
+    return profiled_route;
+  }
+
+  std::sort(
+    merged_segments.begin(),
+    merged_segments.end(),
+    []( const AvoidanceSpeedSegment& lhs,
+        const AvoidanceSpeedSegment& rhs )
+    {
+      return lhs.start_s < rhs.start_s;
+    } );
+
+  constexpr double segment_join_tolerance = 1e-6;
+  std::size_t write_index = 0;
+  for( std::size_t read_index = 1;
+       read_index < merged_segments.size();
+       ++read_index )
+  {
+    auto& current = merged_segments[write_index];
+    const auto& next = merged_segments[read_index];
+    if( next.start_s <= current.end_s + segment_join_tolerance )
+    {
+      current.end_s = std::max( current.end_s, next.end_s );
+      continue;
+    }
+
+    ++write_index;
+    merged_segments[write_index] = next;
+  }
+  merged_segments.resize( write_index + 1 );
+
+  const double target_v =
+    std::max( 0.0, params.max_speed_during_avoidance );
+  const double braking_deceleration =
+    planned_braking_deceleration( vehicle_params, params );
+  std::size_t segment_index = 0;
+
+  for( auto& [s, point] : profiled_route.reference_line )
+  {
+    if( s < ego_s )
+    {
+      continue;
+    }
+
+    while( segment_index < merged_segments.size() &&
+           s > merged_segments[segment_index].end_s )
+    {
+      ++segment_index;
+    }
+
+    if( segment_index >= merged_segments.size() )
+    {
+      break;
+    }
+
+    const auto& segment = merged_segments[segment_index];
+    double allowed_speed = target_v;
+    if( s < segment.start_s )
+    {
+      const double distance_to_segment = segment.start_s - s;
+      allowed_speed =
+        std::sqrt(
+          target_v * target_v +
+          2.0 * braking_deceleration * distance_to_segment );
+    }
+
+    point.max_speed =
+      std::min(
+        point.max_speed.value_or( std::numeric_limits<double>::infinity() ),
+        allowed_speed );
+  }
+
+  return profiled_route;
+}
+
+map::Route
 RouteSpeedPolicy::apply_stop_profile(
   const map::Route& route,
   double ego_s,

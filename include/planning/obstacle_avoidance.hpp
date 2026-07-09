@@ -259,6 +259,12 @@ planned_braking_deceleration(
   const dynamics::PhysicalVehicleParameters& vehicle_params,
   const ObstacleAvoidanceParams& params );
 
+struct AvoidanceSpeedSegment
+{
+  double start_s = std::numeric_limits<double>::infinity();
+  double end_s = -std::numeric_limits<double>::infinity();
+};
+
 class RouteSpeedPolicy
 {
 public:
@@ -270,6 +276,16 @@ public:
     const dynamics::PhysicalVehicleParameters& vehicle_params,
     const ObstacleAvoidanceParams& params,
     double ego_v = std::numeric_limits<double>::infinity() );
+
+  // Apply the avoidance-speed cap only where the modified route actually shifts.
+  // Between disconnected shift segments the original route speed is retained as
+  // far as the braking envelope for the next segment permits.
+  static map::Route apply_segmented_avoidance_speed_profile(
+    const map::Route& route,
+    double ego_s,
+    const std::vector<AvoidanceSpeedSegment>& segments,
+    const dynamics::PhysicalVehicleParameters& vehicle_params,
+    const ObstacleAvoidanceParams& params );
 
   static map::Route apply_stop_profile(
     const map::Route& route,

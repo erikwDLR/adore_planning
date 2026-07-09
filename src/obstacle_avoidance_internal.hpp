@@ -229,14 +229,6 @@ find_static_obstacle_group_on_route(
 // Lateral-shift profile math + modified-route construction (obstacle_avoidance_shift.cpp)
 // ---------------------------------------------------------------------------
 
-void
-apply_avoidance_speed_profile( map::Route& route,
-                               double ego_s,
-                               double shift_start_s,
-                               double maneuver_end_s,
-                               const dynamics::PhysicalVehicleParameters& vehicle_params,
-                               const ObstacleAvoidanceParams& params );
-
 double
 avoidance_shift_alpha_at_s( double s,
                             const ObstacleEnvelope& obstacle,

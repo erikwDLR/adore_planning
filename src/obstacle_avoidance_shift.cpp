@@ -22,24 +22,6 @@ namespace planner
 namespace oa_detail
 {
 
-void
-apply_avoidance_speed_profile( map::Route& route,
-                               double ego_s,
-                               double shift_start_s,
-                               double maneuver_end_s,
-                               const dynamics::PhysicalVehicleParameters& vehicle_params,
-                               const ObstacleAvoidanceParams& params )
-{
-  route =
-    RouteSpeedPolicy::apply_avoidance_speed_profile(
-      route,
-      ego_s,
-      shift_start_s,
-      maneuver_end_s,
-      vehicle_params,
-      params );
-}
-
 double
 avoidance_shift_alpha_at_s( double s,
                             const ObstacleEnvelope& obstacle,
@@ -274,8 +256,8 @@ build_modified_avoidance_route( const map::Route& route,
   const double ego_front_offset =
     ego_params.wheelbase + ego_params.front_axle_to_front_border;
   const double ego_rear_offset = ego_params.rear_border_to_rear_axle;
-  double shift_start_s = std::numeric_limits<double>::infinity();
-  double shift_end_s = -std::numeric_limits<double>::infinity();
+  std::vector<AvoidanceSpeedSegment> speed_segments;
+  speed_segments.reserve( group.obstacles.size() );
   for( const auto& obstacle : group.obstacles )
   {
     const double full_start_s =
@@ -296,21 +278,19 @@ build_modified_avoidance_route( const map::Route& route,
       obstacle.has_persistent_profile
         ? obstacle.persistent_ramp_end_s
         : full_end_s + std::max( 0.0, params.rear_clearance );
-    shift_start_s = std::min( shift_start_s, obstacle_shift_start_s );
-    shift_end_s = std::max( shift_end_s, obstacle_shift_end_s );
+    speed_segments.push_back(
+      AvoidanceSpeedSegment{
+        obstacle_shift_start_s,
+        obstacle_shift_end_s } );
   }
 
-  if( !std::isfinite( shift_start_s ) || !std::isfinite( shift_end_s ) )
-  {
-    return modified_route;
-  }
-  apply_avoidance_speed_profile(
-    modified_route,
-    ego_s,
-    shift_start_s,
-    shift_end_s,
-    ego_params,
-    params );
+  modified_route =
+    RouteSpeedPolicy::apply_segmented_avoidance_speed_profile(
+      modified_route,
+      ego_s,
+      speed_segments,
+      ego_params,
+      params );
 
   return modified_route;
 }

@@ -85,6 +85,111 @@ TEST( ObstacleAvoidance, AvoidanceSpeedProfileCapsOnlyAtShiftStart )
   EXPECT_TRUE( std::isinf( max_speed_at_or_inf( profiled_route, 80.0 ) ) );
 }
 
+TEST( ObstacleAvoidance, SegmentedAvoidanceSpeedRestoresMissionSpeedInLongGap )
+{
+  auto route = make_straight_route( 110.0, 10.0 );
+  for( auto& [s, point] : route.reference_line )
+  {
+    static_cast<void>( s );
+    point.max_speed = 8.0;
+  }
+
+  const auto params = test_params();
+  const auto vehicle_params = test_vehicle_params();
+  const std::vector<adore::planner::AvoidanceSpeedSegment> segments{
+    { 20.0, 30.0 },
+    { 80.0, 90.0 } };
+
+  const auto profiled_route =
+    adore::planner::RouteSpeedPolicy::
+      apply_segmented_avoidance_speed_profile(
+        route,
+        0.0,
+        segments,
+        vehicle_params,
+        params );
+
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 20.0 ), 2.0, 1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 30.0 ), 2.0, 1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 40.0 ), 8.0, 1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 50.0 ), 8.0, 1e-9 );
+  EXPECT_NEAR(
+    max_speed_at_or_inf( profiled_route, 60.0 ),
+    std::sqrt( 44.0 ),
+    1e-9 );
+  EXPECT_NEAR(
+    max_speed_at_or_inf( profiled_route, 70.0 ),
+    std::sqrt( 24.0 ),
+    1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 80.0 ), 2.0, 1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 90.0 ), 2.0, 1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 100.0 ), 8.0, 1e-9 );
+}
+
+TEST( ObstacleAvoidance, SegmentedAvoidanceSpeedKeepsShortGapBrakeSafe )
+{
+  auto route = make_straight_route( 70.0, 5.0 );
+  for( auto& [s, point] : route.reference_line )
+  {
+    static_cast<void>( s );
+    point.max_speed = 8.0;
+  }
+
+  const auto params = test_params();
+  const auto vehicle_params = test_vehicle_params();
+  const std::vector<adore::planner::AvoidanceSpeedSegment> segments{
+    { 20.0, 30.0 },
+    { 40.0, 50.0 } };
+
+  const auto profiled_route =
+    adore::planner::RouteSpeedPolicy::
+      apply_segmented_avoidance_speed_profile(
+        route,
+        0.0,
+        segments,
+        vehicle_params,
+        params );
+
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 30.0 ), 2.0, 1e-9 );
+  EXPECT_NEAR(
+    max_speed_at_or_inf( profiled_route, 35.0 ),
+    std::sqrt( 14.0 ),
+    1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 40.0 ), 2.0, 1e-9 );
+}
+
+TEST( ObstacleAvoidance, SegmentedAvoidanceSpeedMergesOverlappingRamps )
+{
+  auto route = make_straight_route( 80.0, 10.0 );
+  for( auto& [s, point] : route.reference_line )
+  {
+    static_cast<void>( s );
+    point.max_speed = 8.0;
+  }
+
+  const auto params = test_params();
+  const auto vehicle_params = test_vehicle_params();
+  const std::vector<adore::planner::AvoidanceSpeedSegment> segments{
+    { 20.0, 40.0 },
+    { 35.0, 60.0 } };
+
+  const auto profiled_route =
+    adore::planner::RouteSpeedPolicy::
+      apply_segmented_avoidance_speed_profile(
+        route,
+        0.0,
+        segments,
+        vehicle_params,
+        params );
+
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 20.0 ), 2.0, 1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 30.0 ), 2.0, 1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 40.0 ), 2.0, 1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 50.0 ), 2.0, 1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 60.0 ), 2.0, 1e-9 );
+  EXPECT_NEAR( max_speed_at_or_inf( profiled_route, 70.0 ), 8.0, 1e-9 );
+}
+
 TEST( ObstacleAvoidance, AvoidanceSpeedFloorNeverExceedsConfiguredCap )
 {
   auto params = test_params();

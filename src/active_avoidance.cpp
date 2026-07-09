@@ -64,6 +64,29 @@ start_active_avoidance_state(
 }
 
 bool
+should_stop_for_oncoming_monitor_result(
+    const ObstacleAvoidanceMonitorResult& monitor_result,
+    const ObstacleAvoidanceParams& params )
+{
+    if( monitor_result.should_abort_before_commitment )
+    {
+        return true;
+    }
+
+    if( monitor_result.safe_to_continue )
+    {
+        return false;
+    }
+
+    if( params.stop_for_oncoming_after_commitment )
+    {
+        return true;
+    }
+
+    return monitor_result.oncoming.oncoming_arrival_time <= 1e-6;
+}
+
+bool
 routes_have_compatible_geometry(
     const map::Route& baseline,
     const map::Route& candidate,

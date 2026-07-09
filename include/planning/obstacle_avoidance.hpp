@@ -143,6 +143,12 @@ struct ObstacleAvoidanceParams
   // the maneuver is rejected.
   double oncoming_time_margin = 1.0;
 
+  // Stop on the currently driven modified route when a newly detected oncoming
+  // conflict appears after commitment. If false, a predicted future arrival is
+  // cleared by finishing the maneuver; an oncoming already inside the conflict
+  // interval still triggers a stop.
+  bool stop_for_oncoming_after_commitment = true;
+
   // Minimum speed for ego vehicle when computing clear time. Prevents division by
   // very small numbers; uses max(actual_ego_speed, min_ego_speed_for_gap_check).
   double min_ego_speed_for_gap_check = 1.0;
@@ -489,9 +495,9 @@ struct ObstacleAvoidanceManeuver
   double opposite_lane_conflict_start_s = 0.0;
   double opposite_lane_conflict_end_s = 0.0;
 
-  // Before this point, a new oncoming conflict can still abort the maneuver to a
-  // controlled stop before the static obstacle. After this point, the safer
-  // fallback is usually to slow down and finish returning to the lane.
+  // Before this point, a new oncoming conflict always aborts the maneuver to a
+  // controlled stop before the static obstacle. After this point the response is
+  // governed by stop_for_oncoming_after_commitment.
   double commitment_s = 0.0;
 };
 

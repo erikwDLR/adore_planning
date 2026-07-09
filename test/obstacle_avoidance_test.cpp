@@ -203,6 +203,68 @@ TEST( ObstacleAvoidance, AvoidanceSpeedFloorNeverExceedsConfiguredCap )
     1e-9 );
 }
 
+TEST( ObstacleAvoidance, SafeOncomingMonitorResultNeverStops )
+{
+  adore::planner::ObstacleAvoidanceMonitorResult monitor_result;
+  monitor_result.safe_to_continue = true;
+
+  auto params = test_params();
+  params.stop_for_oncoming_after_commitment = true;
+
+  EXPECT_FALSE(
+    adore::planner::should_stop_for_oncoming_monitor_result(
+      monitor_result,
+      params ) );
+}
+
+TEST( ObstacleAvoidance, PostCommitmentOncomingStopRespectsParameter )
+{
+  adore::planner::ObstacleAvoidanceMonitorResult monitor_result;
+  monitor_result.safe_to_continue = false;
+  monitor_result.already_committed = true;
+  monitor_result.oncoming.conflict = true;
+  monitor_result.oncoming.oncoming_arrival_time = 5.0;
+
+  auto params = test_params();
+  params.stop_for_oncoming_after_commitment = false;
+  EXPECT_FALSE(
+    adore::planner::should_stop_for_oncoming_monitor_result(
+      monitor_result,
+      params ) );
+
+  params.stop_for_oncoming_after_commitment = true;
+  EXPECT_TRUE(
+    adore::planner::should_stop_for_oncoming_monitor_result(
+      monitor_result,
+      params ) );
+}
+
+TEST( ObstacleAvoidance, ImmediateOrPreCommitmentOncomingAlwaysStops )
+{
+  auto params = test_params();
+  params.stop_for_oncoming_after_commitment = false;
+
+  adore::planner::ObstacleAvoidanceMonitorResult pre_commitment;
+  pre_commitment.safe_to_continue = false;
+  pre_commitment.should_abort_before_commitment = true;
+  pre_commitment.oncoming.conflict = true;
+  pre_commitment.oncoming.oncoming_arrival_time = 5.0;
+  EXPECT_TRUE(
+    adore::planner::should_stop_for_oncoming_monitor_result(
+      pre_commitment,
+      params ) );
+
+  adore::planner::ObstacleAvoidanceMonitorResult already_inside;
+  already_inside.safe_to_continue = false;
+  already_inside.already_committed = true;
+  already_inside.oncoming.conflict = true;
+  already_inside.oncoming.oncoming_arrival_time = 0.0;
+  EXPECT_TRUE(
+    adore::planner::should_stop_for_oncoming_monitor_result(
+      already_inside,
+      params ) );
+}
+
 TEST( ObstacleAvoidance, StopBeforeObstacleDoesNotImmediatelySetZeroEverywhere )
 {
   const auto route = make_straight_route( 100.0, 5.0 );

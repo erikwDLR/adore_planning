@@ -79,6 +79,15 @@ make_oncoming_monitor_conflict(
   const ObstacleAvoidanceMonitorResult& monitor_result,
   double reference_s );
 
+// Decide whether an active opposite-lane monitor result must be converted into
+// a route stop. Before commitment and for an oncoming already in the conflict
+// interval this is always true; predicted post-commitment arrivals are governed
+// by stop_for_oncoming_after_commitment.
+bool
+should_stop_for_oncoming_monitor_result(
+  const ObstacleAvoidanceMonitorResult& monitor_result,
+  const ObstacleAvoidanceParams& params );
+
 // True if a static/slow conflict keeps at least side_clearance to a route-
 // centered ego footprint, so ego can keep going without stopping.
 bool

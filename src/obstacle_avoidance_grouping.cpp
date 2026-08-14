@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: EPL-2.0
  ********************************************************************************/
 
-// Static-obstacle detection: participant classification (static / slow-oncoming /
-// opposite-heading), per-obstacle route-frame envelopes, and collection of every
+// Static-obstacle detection: shared motion classification, per-obstacle
+// route-frame envelopes, and collection of every
 // relevant corridor intrusion for this planning cycle. Further or newly revealed
 // objects are added cyclically from the driven-route corridor check without
 // distance-based clustering. Depends on the geometry and projection helpers in
@@ -28,80 +28,13 @@ namespace oa_detail
 {
 
 bool
-participant_has_future_motion_prediction(
-  const dynamics::TrafficParticipant& participant,
-  double min_motion_speed,
-  double min_motion_distance )
-{
-  if( !participant.trajectory.has_value() ||
-      participant.trajectory->states.size() < 2 )
-  {
-    return false;
-  }
-
-  const double now_time = participant.state.time;
-  const double motion_speed_threshold =
-    std::max( 0.0, min_motion_speed );
-  const double motion_distance_threshold =
-    std::max( 0.5, min_motion_distance );
-
-  bool saw_usable_state = false;
-
-  for( const auto& state : participant.trajectory->states )
-  {
-    if( std::isfinite( now_time ) &&
-        std::isfinite( state.time ) &&
-        state.time + 0.5 < now_time )
-    {
-      continue;
-    }
-
-    saw_usable_state = true;
-
-    if( std::fabs( state.vx ) > motion_speed_threshold )
-    {
-      return true;
-    }
-
-    const double distance_from_current =
-      std::hypot(
-        state.x - participant.state.x,
-        state.y - participant.state.y );
-
-    if( distance_from_current > motion_distance_threshold )
-    {
-      return true;
-    }
-  }
-
-  return saw_usable_state && std::fabs( participant.state.vx ) > motion_speed_threshold;
-}
-
-bool
-participant_is_slow_opposite_direction_traffic(
-  const map::Route& route,
+participant_is_static_for_avoidance(
   const dynamics::TrafficParticipant& participant,
   const ObstacleAvoidanceParams& params )
 {
-  const double speed = std::fabs( participant.state.vx );
-
-  if( speed > params.max_static_object_speed )
-  {
-    return false;
-  }
-
-  const double participant_s =
-    project_s_on_reference_line( route, participant.state );
-  if( !std::isfinite( participant_s ) )
-  {
-    return false;
-  }
-
-  const auto route_pose = route.get_pose_at_s( participant_s );
-  const double yaw_diff =
-    normalize_angle( participant.state.yaw_angle - route_pose.yaw );
-
-  return std::fabs( yaw_diff ) >= params.min_oncoming_heading_diff;
+  return
+    std::hypot( participant.state.vx, participant.state.vy ) <=
+    std::max( 0.0, params.max_static_object_speed );
 }
 
 bool
@@ -172,12 +105,8 @@ make_avoidance_group_from_obstacles( std::vector<ObstacleEnvelope> obstacles )
     envelope.overlaps_ego_corridor =
       envelope.overlaps_ego_corridor || obstacle.overlaps_ego_corridor;
   }
-  envelope.s_min = envelope.object_s_min;
-  envelope.s_max = envelope.object_s_max;
-  envelope.l_min = envelope.object_l_min;
-  envelope.l_max = envelope.object_l_max;
-  envelope.center_s = 0.5 * ( envelope.s_min + envelope.s_max );
-  envelope.center_l = 0.5 * ( envelope.l_min + envelope.l_max );
+  envelope.center_s =
+    0.5 * ( envelope.object_s_min + envelope.object_s_max );
 
   group.obstacles = std::move( obstacles );
   group.envelope = envelope;
@@ -220,11 +149,7 @@ find_static_obstacle_group_on_route(
     return std::nullopt;
   }
 
-  const double ego_half_width =
-    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
-
-  const double search_start_s = ego_s + params.min_object_ahead;
-  const double search_end_s   = ego_s + params.max_object_ahead;
+  const double ego_half_width = 0.5 * ego_params.body_width;
 
   std::vector<ObstacleEnvelope> obstacles;
 
@@ -260,12 +185,8 @@ find_static_obstacle_group_on_route(
       frozen.object_s_max = contribution.object_s_max;
       frozen.object_l_min = contribution.object_l_min;
       frozen.object_l_max = contribution.object_l_max;
-      frozen.s_min = frozen.object_s_min;
-      frozen.s_max = frozen.object_s_max;
-      frozen.l_min = frozen.object_l_min;
-      frozen.l_max = frozen.object_l_max;
-      frozen.center_s = 0.5 * ( frozen.s_min + frozen.s_max );
-      frozen.center_l = 0.5 * ( frozen.l_min + frozen.l_max );
+      frozen.center_s =
+        0.5 * ( frozen.object_s_min + frozen.object_s_max );
       frozen.overlaps_ego_corridor = true;
       frozen.committed_hold = true;
 
@@ -296,7 +217,7 @@ find_static_obstacle_group_on_route(
   }
 
   const auto merge_observation =
-    [&]( ObstacleEnvelope observation, bool forced_from_driven_corridor )
+    [&]( ObstacleEnvelope observation )
     {
       auto existing_it =
         std::find_if(
@@ -335,26 +256,18 @@ find_static_obstacle_group_on_route(
           existing_it->participant_ids.push_back( id );
         }
       }
-      existing_it->s_min = existing_it->object_s_min;
-      existing_it->s_max = existing_it->object_s_max;
-      existing_it->l_min = existing_it->object_l_min;
-      existing_it->l_max = existing_it->object_l_max;
       existing_it->center_s =
-        0.5 * ( existing_it->s_min + existing_it->s_max );
-      existing_it->center_l =
-        0.5 * ( existing_it->l_min + existing_it->l_max );
+        0.5 * ( existing_it->object_s_min + existing_it->object_s_max );
       existing_it->overlaps_ego_corridor = true;
 
       if( existing_it->has_persistent_profile )
       {
-        const double ego_front_offset =
-          ego_params.wheelbase + ego_params.front_axle_to_front_border;
-        const double ego_rear_offset =
-          ego_params.rear_border_to_rear_axle;
+        const double ego_half_length =
+          symmetric_shift_ego_half_length( ego_params );
         const double expanded_full_start =
-          existing_it->object_s_min - ego_front_offset;
+          existing_it->object_s_min - ego_half_length;
         const double expanded_full_end =
-          existing_it->object_s_max + ego_rear_offset;
+          existing_it->object_s_max + ego_half_length;
         const double expanded_ramp_start =
           std::max(
             0.0,
@@ -381,12 +294,6 @@ find_static_obstacle_group_on_route(
             expanded_ramp_end );
       }
 
-      if( forced_from_driven_corridor )
-      {
-        // This hull invalidated the currently driven route and therefore must
-        // be validated again from ego's live pose.
-        existing_it->committed_hold = false;
-      }
     };
 
   for( const auto& [id, participant] : traffic_participants.participants )
@@ -416,20 +323,7 @@ find_static_obstacle_group_on_route(
       continue;
     }
 
-    if( std::fabs( participant.state.vx ) > params.max_static_object_speed )
-    {
-      continue;
-    }
-
-    if( participant_has_future_motion_prediction(
-          participant,
-          params.max_static_object_speed,
-          1.0 ) ||
-        ( std::fabs( participant.state.vx ) > params.min_motion_speed &&
-          participant_is_slow_opposite_direction_traffic(
-            route,
-            participant,
-            params ) ) )
+    if( !participant_is_static_for_avoidance( participant, params ) )
     {
       continue;
     }
@@ -438,25 +332,22 @@ find_static_obstacle_group_on_route(
     env.id = participant_id;
     env.participant_ids.push_back( env.id );
 
-    auto projection_params = params;
-    if( forced_from_driven_corridor )
-    {
-      // The driven route may legitimately be several metres away from the
-      // mission centerline. The modified-route corridor check already proved
-      // relevance, so mission-frame plausibility limits must not discard this
-      // object during the coordinate conversion.
-      projection_params.max_projection_distance_from_route = 0.0;
-      projection_params.max_object_lateral_distance =
-        std::numeric_limits<double>::infinity();
-    }
-
     if( !project_obstacle_to_route_analytic(
           route,
           participant,
-          projection_params,
-          ego_s,
+          params,
           ego_half_width,
           env ) )
+    {
+      continue;
+    }
+
+    // The initial search only considers objects whose leading edge has not
+    // passed ego's reference point. An object forced by the corridor of the
+    // route ego is actually driving is exempt: it can still overlap the rear
+    // part of the ego footprint after its leading edge passed the rear axle.
+    if( !forced_from_driven_corridor &&
+        env.object_s_max < ego_s )
     {
       continue;
     }
@@ -479,17 +370,6 @@ find_static_obstacle_group_on_route(
       continue;
     }
 
-    const double obstacle_timing_s_min =
-      env.object_s_min - std::max( 0.0, params.front_clearance );
-    const double obstacle_timing_s_max =
-      env.object_s_max + std::max( 0.0, params.rear_clearance );
-
-    if( obstacle_timing_s_max < search_start_s ||
-        obstacle_timing_s_min > search_end_s )
-    {
-      continue;
-    }
-
     // Only obstacles that actually reach into the ego corridor drive a maneuver.
     // Every one of them is carried (see below); objects outside the corridor are
     // not collected now that clustering / secondary inclusion are gone.
@@ -504,8 +384,7 @@ find_static_obstacle_group_on_route(
     // relevant makes candidate generation compute the absolute shift needed to
     // clear that hull from the fixed mission baseline.
     env.overlaps_ego_corridor = true;
-    merge_observation(
-      std::move( env ), forced_from_driven_corridor );
+    merge_observation( std::move( env ) );
   }
 
   if( obstacles.empty() )

@@ -34,16 +34,6 @@ start_active_avoidance_state(
   const ObstacleAvoidanceResult& oa_result,
   const map::Route& mission_route_baseline );
 
-// Compare only route geometry, not speed overlays. Active obstacle hulls use
-// route-s coordinates and therefore remain valid only while this geometric
-// reference frame stays compatible.
-bool
-routes_have_compatible_geometry(
-  const map::Route& baseline,
-  const map::Route& candidate,
-  double position_tolerance = 0.5,
-  double length_tolerance = 1.0 );
-
 // Monotonic-progression plausibility for the ego projection onto the active
 // modified route. Enforces no-backward motion and rejects implausible forward
 // jumps (projection artifacts, e.g. matches at the search-window edge) by
@@ -54,7 +44,8 @@ std::optional<double>
 compute_monotonic_ego_s_modified(
   double ego_s_modified_raw,
   const dynamics::VehicleStateDynamic& vehicle_state_dynamic,
-  ActiveAvoidanceState& state );
+  ActiveAvoidanceState& state,
+  const ObstacleAvoidanceParams& params = {} );
 
 // ----------------------------------------------------------------------------
 // Conflict assessment and stop geometry for a route ego is following.
@@ -79,22 +70,12 @@ make_oncoming_monitor_conflict(
   const ObstacleAvoidanceMonitorResult& monitor_result,
   double reference_s );
 
-// Decide whether an active opposite-lane monitor result must be converted into
-// a route stop. Before commitment and for an oncoming already in the conflict
-// interval this is always true; predicted post-commitment arrivals are governed
-// by stop_for_oncoming_after_commitment.
+// Convert every unsafe active opposite-lane monitor result into a route stop.
+// Late perception after commitment is common and is therefore always safety
+// relevant rather than controlled by a runtime switch.
 bool
 should_stop_for_oncoming_monitor_result(
-  const ObstacleAvoidanceMonitorResult& monitor_result,
-  const ObstacleAvoidanceParams& params );
-
-// True if a static/slow conflict keeps at least side_clearance to a route-
-// centered ego footprint, so ego can keep going without stopping.
-bool
-static_or_slow_conflict_has_side_clearance(
-  const RouteCorridorConflict& conflict,
-  const dynamics::PhysicalVehicleParameters& vehicle_params,
-  const ObstacleAvoidanceParams& params );
+  const ObstacleAvoidanceMonitorResult& monitor_result );
 
 // Longitudinal braking geometry to stop before a conflict on the active route.
 RouteStopPlan

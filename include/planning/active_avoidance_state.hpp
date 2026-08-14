@@ -35,8 +35,10 @@ struct ActiveAvoidanceState
   map::Route base_modified_route;
 
   // Fixed geometric reference frame in which every persistent obstacle hull
-  // and shift contribution is expressed. Live traffic-light and weather speed
-  // overlays may change, but active replans must not silently switch this frame.
+  // and shift contribution is expressed. It is retained until the maneuver
+  // reaches release_s and is reset only after a usable trajectory on the latest
+  // mission route has been created. Live traffic-light and weather speed
+  // overlays may change, but active replans never switch this frame.
   map::Route mission_route_baseline;
 
   double shift_start_s = 0.0;
@@ -60,35 +62,12 @@ struct ActiveAvoidanceState
 
   ObstacleAvoidanceManeuver maneuver;
 
-  // Oncoming-wait latch. Once the opposite-lane monitor decides to stop for an
-  // oncoming participant, hold that stop until the participant has cleared the
-  // conflict interval (or vanished), instead of re-deciding
-  // go/stop every cycle. Re-deciding each cycle near the decision boundary makes
-  // ego oscillate between braking and creeping while it waits. oncoming_wait_release_s
-  // is the near edge (conflict_start_s) of the opposite-lane conflict interval; the
-  // oncoming travels against the route direction, so it has cleared once its route-s
-  // drops below this value.
-  bool   oncoming_wait_active = false;
-  int    oncoming_wait_participant_id = -1;
-  double oncoming_wait_release_s = std::numeric_limits<double>::quiet_NaN();
-  double oncoming_wait_last_seen_time = std::numeric_limits<double>::quiet_NaN();
-
   // Last valid projection on the active modified route. This keeps progress
   // monotonic while the route is laterally offset from the mission route.
   // last_modified_time records when that projection was taken so implausible
   // forward jumps can be bounded by odometry.
   double last_modified_s = std::numeric_limits<double>::quiet_NaN();
   double last_modified_time = std::numeric_limits<double>::quiet_NaN();
-
-  // Clear the oncoming-wait latch. Used on maneuver reset, on a freshly
-  // (re)committed maneuver, and when the wait releases mid-maneuver.
-  void clear_oncoming_wait()
-  {
-    oncoming_wait_active = false;
-    oncoming_wait_participant_id = -1;
-    oncoming_wait_release_s = std::numeric_limits<double>::quiet_NaN();
-    oncoming_wait_last_seen_time = std::numeric_limits<double>::quiet_NaN();
-  }
 
   void reset()
   {
@@ -108,8 +87,6 @@ struct ActiveAvoidanceState
     committed_contributions.clear();
 
     maneuver = ObstacleAvoidanceManeuver{};
-
-    clear_oncoming_wait();
 
     last_modified_s = std::numeric_limits<double>::quiet_NaN();
     last_modified_time = std::numeric_limits<double>::quiet_NaN();

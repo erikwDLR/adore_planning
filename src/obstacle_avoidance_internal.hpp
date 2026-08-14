@@ -39,19 +39,6 @@ struct RouteFrame
   double yaw = 0.0;
 };
 
-struct RouteDifferenceBounds
-{
-  bool has_difference = false;
-
-  double first_different_s = 0.0;
-  double last_different_s = 0.0;
-
-  // First route point after the shifted section where modified_route and
-  // original_route are equal again.
-  double first_equal_s_after_last_difference = 0.0;
-  bool has_equal_point_after_last_difference = false;
-};
-
 struct RouteProjectionSample
 {
   double s = std::numeric_limits<double>::quiet_NaN();
@@ -64,18 +51,6 @@ normalize_angle( double angle );
 
 double
 smoothstep01( double t );
-
-bool
-map_points_differ_xy(
-  const adore::map::MapPoint& a,
-  const adore::map::MapPoint& b,
-  const double xy_tolerance );
-
-std::optional<RouteDifferenceBounds>
-find_route_difference_bounds(
-  const adore::map::Route& original_route,
-  const adore::map::Route& modified_route,
-  const double xy_tolerance );
 
 RouteFrame
 make_route_frame( const map::Route& route, double s );
@@ -110,13 +85,7 @@ struct ObstacleEnvelope
   double object_l_min = std::numeric_limits<double>::infinity();
   double object_l_max = -std::numeric_limits<double>::infinity();
 
-  double s_min = std::numeric_limits<double>::infinity();
-  double s_max = -std::numeric_limits<double>::infinity();
-  double l_min = std::numeric_limits<double>::infinity();
-  double l_max = -std::numeric_limits<double>::infinity();
-
   double center_s = std::numeric_limits<double>::infinity();
-  double center_l = 0.0;
 
   bool overlaps_ego_corridor = false;
 
@@ -130,24 +99,21 @@ struct ObstacleEnvelope
   double persistent_full_shift_end_s = -std::numeric_limits<double>::infinity();
   double persistent_ramp_end_s = -std::numeric_limits<double>::infinity();
 
-  // Belongs to the maneuver ego is already executing (its span overlaps the committed
-  // hold region). Its clearance is not re-validated from ego's transient turn-in pose,
-  // where the object ego is currently passing spuriously fails. Set geometrically in
-  // find_static_obstacle_group_on_route -- id-independent.
+  // Belongs to the maneuver ego is already executing. If ego is already
+  // alongside it at the first replanned trajectory state, validation permits
+  // the existing clearance but never a smaller future clearance. Committed
+  // obstacles farther ahead still require the normal hard clearance.
   bool committed_hold = false;
 };
 
 struct ParticipantFootprintOnRoute
 {
-  bool valid = false;
-
   double s_min = std::numeric_limits<double>::infinity();
   double s_max = -std::numeric_limits<double>::infinity();
   double l_min = std::numeric_limits<double>::infinity();
   double l_max = -std::numeric_limits<double>::infinity();
 
   double center_s = std::numeric_limits<double>::infinity();
-  double center_l = 0.0;
 };
 
 const char*
@@ -156,16 +122,10 @@ route_corridor_object_class_name( RouteCorridorObjectClass object_class );
 bool
 contains_participant_id( const std::vector<int>& ids, int id );
 
-void
-fill_world_footprint_from_participant( RouteCorridorConflict& conflict,
-                                       const dynamics::TrafficParticipant& participant,
-                                       const ObstacleAvoidanceParams& params );
-
 bool
 project_obstacle_to_route_analytic( const map::Route& route,
                                     const dynamics::TrafficParticipant& participant,
                                     const ObstacleAvoidanceParams& params,
-                                    double ego_s,
                                     double ego_half_width,
                                     ObstacleEnvelope& envelope );
 
@@ -188,16 +148,8 @@ struct AvoidanceGroup
   ObstacleEnvelope envelope;
 };
 
-// Participant classification helpers (shared with the oncoming module).
 bool
-participant_has_future_motion_prediction(
-  const dynamics::TrafficParticipant& participant,
-  double min_motion_speed,
-  double min_motion_distance );
-
-bool
-participant_is_slow_opposite_direction_traffic(
-  const map::Route& route,
+participant_is_static_for_avoidance(
   const dynamics::TrafficParticipant& participant,
   const ObstacleAvoidanceParams& params );
 
@@ -228,6 +180,13 @@ find_static_obstacle_group_on_route(
 // ---------------------------------------------------------------------------
 // Lateral-shift profile math + modified-route construction (obstacle_avoidance_shift.cpp)
 // ---------------------------------------------------------------------------
+
+inline double
+symmetric_shift_ego_half_length(
+  const dynamics::PhysicalVehicleParameters& ego_params )
+{
+  return 0.5 * ego_params.body_length;
+}
 
 double
 avoidance_shift_alpha_at_s( double s,
@@ -378,10 +337,12 @@ compute_ego_clear_time_from_trajectory(
   const dynamics::Trajectory& trajectory,
   double now_time,
   double conflict_end_s,
-  double initial_s_hint );
+  double initial_s_hint,
+  double projection_window );
 
 planner::OncomingConflictResult
 check_oncoming_gap( const map::Route& route,
+                    const map::Route& driven_route,
                     const dynamics::VehicleStateDynamic& ego,
                     const dynamics::TrafficParticipantSet& traffic_participants,
                     const AvoidanceGroup& group,
@@ -426,7 +387,10 @@ struct ShiftCandidate
 struct TrajectoryValidationResult
 {
   bool valid = true;
-  double min_lane_margin = std::numeric_limits<double>::infinity();
+  bool obstacle_clearance_violation = false;
+  // Margin to the configured route-planning target (side_clearance), retained
+  // even though trajectory rejection uses ego_corridor_safety_margin. A
+  // negative value feeds one adaptive route-expansion retry.
   double min_obstacle_lateral_margin = std::numeric_limits<double>::infinity();
   std::string reason;
 };
@@ -444,19 +408,15 @@ struct RouteShiftPlanCandidate
   bool uses_opposite_lane = false;
   OppositeLaneConflictInterval opposite_conflict_interval;
   TrajectoryValidationResult validation;
-  OncomingConflictResult oncoming;
 
   double ego_s_modified = std::numeric_limits<double>::quiet_NaN();
-  double score = std::numeric_limits<double>::infinity();
 };
 
 bool
-candidate_uses_opposite_direction_lane(
-  const map::Route& route,
-  const AvoidanceGroup& group,
-  double lateral_shift,
-  bool in_lane,
+candidate_route_conflict_is_ignorable(
+  const RouteCorridorConflict& conflict,
   AvoidanceCandidateType candidate_type,
+  bool uses_opposite_lane,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params );
 
@@ -513,11 +473,8 @@ validate_planned_shift_trajectory(
   AvoidanceCandidateType candidate_type,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params,
+  double target_side_clearance,
   double initial_s_hint );
-
-double
-score_route_shift_candidate( const RouteShiftPlanCandidate& candidate,
-                             const ObstacleAvoidanceParams& params );
 
 // ---------------------------------------------------------------------------
 // Stop-route construction (obstacle_avoidance_stop_route.cpp)

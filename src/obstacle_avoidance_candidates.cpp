@@ -28,59 +28,33 @@ namespace planner
 namespace oa_detail
 {
 
-// Returns true if the candidate maneuver enters a driving lane that goes in the
-// opposite direction relative to the current route lane.
-//
-// Preferred behavior: derived from map data via `left_of_reference`.
-// Fallback: if no map information is available for the shifted region, this
-// helper uses the right-hand-traffic convention that a left shift leaving the
-// current lane (`lateral_shift > 0 && !in_lane`) is a probable opposite-lane
-// use. In left-hand-traffic environments this convention does not hold and
-// the helper would need to be adapted.
 bool
-candidate_uses_opposite_direction_lane(
-  const map::Route& route,
-  const AvoidanceGroup& group,
-  double lateral_shift,
-  bool in_lane,
+candidate_route_conflict_is_ignorable(
+  const RouteCorridorConflict& conflict,
   AvoidanceCandidateType candidate_type,
+  bool uses_opposite_lane,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params )
 {
-  if( !params.opposite_lane_enabled )
-  {
-    return false;
-  }
-
-  if( candidate_type == AvoidanceCandidateType::OppositeDirection )
+  // A candidate that actually occupies an opposite-direction lane is governed
+  // by check_oncoming_gap. Letting the generic route-corridor check reject the
+  // same oncoming participant first would bypass its time-gap acceptance rule.
+  // Other object classes remain generic route-safety conflicts.
+  if( uses_opposite_lane &&
+      conflict.object_class == RouteCorridorObjectClass::Oncoming )
   {
     return true;
   }
 
-  if( candidate_type == AvoidanceCandidateType::InLane || in_lane )
-  {
-    return false;
-  }
-
-  if( !std::isfinite( lateral_shift ) || std::fabs( lateral_shift ) < 1e-6 )
-  {
-    return false;
-  }
-
-  const auto conflict_interval =
-    compute_opposite_lane_conflict_interval(
-      route,
-      group,
-      lateral_shift,
+  // An in-lane shift may see geometrically unrelated traffic in the neighbouring
+  // oncoming lane inside the broad route-frame corridor. Ignore it only when the
+  // configured side clearance to the route-centred ego footprint is preserved.
+  return
+    candidate_type == AvoidanceCandidateType::InLane &&
+    is_oncoming_other_lane_conflict(
+      conflict,
       ego_params,
       params );
-
-  if( conflict_interval.valid )
-  {
-    return conflict_interval.occupies_opposite_lane;
-  }
-
-  return false;
 }
 
 bool
@@ -96,8 +70,7 @@ candidate_respects_drivable_area( const map::Route& route,
     return false;
   }
 
-  const double ego_half_width =
-    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
+  const double ego_half_width = 0.5 * ego_params.body_width;
 
   for( const auto& [route_s, route_point] : route.reference_line )
   {
@@ -145,8 +118,7 @@ make_candidate_from_obstacle_hulls(
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params )
 {
-  const double ego_half_width =
-    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
+  const double ego_half_width = 0.5 * ego_params.body_width;
   const bool shift_left = direction == ShiftDirection::Left;
   double required_shift = 0.0;
 
@@ -198,13 +170,7 @@ candidate_respects_opposite_direction_area(
     return false;
   }
 
-  if( !params.opposite_lane_enabled )
-  {
-    return false;
-  }
-
-  const double ego_half_width =
-    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
+  const double ego_half_width = 0.5 * ego_params.body_width;
   const bool shift_left = lateral_shift > 0.0;
 
   for( const auto& [route_s, route_point] : route.reference_line )
@@ -262,71 +228,6 @@ candidate_respects_opposite_direction_area(
   return true;
 }
 
-bool
-modified_route_clears_group_obstacles(
-  const AvoidanceGroup& group,
-  double lateral_shift,
-  const dynamics::PhysicalVehicleParameters& ego_params,
-  const ObstacleAvoidanceParams& params )
-{
-  // Separate, route-geometry check that the modified route actually clears
-  // EVERY obstacle in the group. This is deliberately independent of
-  // validate_planned_shift_trajectory, which only walks the finite planned
-  // trajectory horizon: an obstacle further downstream than the trajectory
-  // currently reaches is never longitudinally overlapped there and so is never
-  // clearance-checked, even though the shifted route runs right through it.
-  // The gap is widened by required_signed_shift_for_obstacle clamping each
-  // obstacle's need to the (leader-sized) single candidate shift, so a trailing
-  // obstacle sitting in the shifted path reports a "full" shift that does not
-  // clear it. Here we sample each obstacle's own longitudinal extent, evaluate
-  // the shift profile there, and require the ego footprint to clear it by the
-  // configured side clearance - mirroring the obstacle-clearance math in
-  // validate_planned_shift_trajectory but over the route, not the trajectory.
-  const double ego_half_width =
-    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
-  const double required_clearance = std::max( 0.0, params.side_clearance );
-  // Match validate_planned_shift_trajectory's tolerance for the route round-trip
-  // numerical noise so the two checks agree at the margin.
-  constexpr double geometry_validation_tolerance = 0.02;
-  constexpr int obstacle_samples = 5;
-
-  for( const auto& obstacle : group.obstacles )
-  {
-    const double s_min = obstacle.object_s_min;
-    const double s_max = obstacle.object_s_max;
-    const double span = std::max( 0.0, s_max - s_min );
-
-    for( int k = 0; k <= obstacle_samples; ++k )
-    {
-      const double s =
-        s_min + span * ( static_cast<double>( k ) /
-                         static_cast<double>( obstacle_samples ) );
-      const double center_l =
-        avoidance_shift_offset_at_s(
-          s,
-          group,
-          lateral_shift,
-          ego_params,
-          params );
-
-      const double ego_min_l = center_l - ego_half_width;
-      const double ego_max_l = center_l + ego_half_width;
-
-      const double left_clearance = ego_min_l - obstacle.object_l_max;
-      const double right_clearance = obstacle.object_l_min - ego_max_l;
-      const double actual_clearance =
-        std::max( left_clearance, right_clearance );
-
-      if( actual_clearance - required_clearance < -geometry_validation_tolerance )
-      {
-        return false;
-      }
-    }
-  }
-
-  return true;
-}
-
 void
 evaluate_shift_candidate( ShiftCandidate& candidate,
                           const map::Route& route,
@@ -339,49 +240,9 @@ evaluate_shift_candidate( ShiftCandidate& candidate,
     return;
   }
 
-  // Independent of the drivable-area handling below (and of the finite-horizon
-  // trajectory validation), the modified route must clear every obstacle in the
-  // group. Without this a downstream obstacle sitting in the shifted path - its
-  // true required shift clamped to the leader-sized candidate shift - would be
-  // accepted at plan time and only stop the ego at runtime.
-  if( !modified_route_clears_group_obstacles(
-        group,
-        candidate.shift,
-        ego_params,
-        params ) )
-  {
-    candidate.valid = false;
-    return;
-  }
-
-  if( !params.enforce_drivable_area )
-  {
-    candidate.in_lane =
-      candidate.type == AvoidanceCandidateType::InLane;
-
-    if( ( candidate.type == AvoidanceCandidateType::InLane &&
-          params.in_lane_shift_enabled ) ||
-        ( candidate.type == AvoidanceCandidateType::AdjacentSameDirection &&
-          params.adjacent_lane_enabled ) ||
-        ( candidate.type == AvoidanceCandidateType::OppositeDirection &&
-          params.opposite_lane_enabled ) )
-    {
-      return;
-    }
-
-    candidate.valid = false;
-    return;
-  }
-
   if( candidate.type == AvoidanceCandidateType::OppositeDirection )
   {
     candidate.in_lane = false;
-
-    if( !params.opposite_lane_enabled )
-    {
-      candidate.valid = false;
-      return;
-    }
 
     if( !candidate_respects_opposite_direction_area(
           route,
@@ -406,19 +267,22 @@ evaluate_shift_candidate( ShiftCandidate& candidate,
 
   if( fits_current_lane )
   {
-    candidate.in_lane = true;
+    candidate.in_lane =
+      candidate.type == AvoidanceCandidateType::InLane;
+    // Candidate types describe enabled maneuver classes, not merely scoring
+    // preferences. An adjacent-lane candidate that never leaves the current
+    // lane would otherwise duplicate the in-lane candidate and could bypass a
+    // disabled in_lane_shift_enabled mode.
+    if( candidate.type == AvoidanceCandidateType::AdjacentSameDirection )
+    {
+      candidate.valid = false;
+    }
     return;
   }
 
   candidate.in_lane = false;
 
   if( candidate.type == AvoidanceCandidateType::InLane )
-  {
-    candidate.valid = false;
-    return;
-  }
-
-  if( !params.adjacent_lane_enabled )
   {
     candidate.valid = false;
     return;
@@ -461,10 +325,9 @@ generate_shift_candidate_variants(
       params );
 
   // One minimal-shift candidate per side: the required shift to clear the group by
-  // side_clearance. No wider fan-out -- a wider shift never clears the obstacle
-  // better and is less likely to stay drivable, and the side_clearance margin
-  // absorbs planner undershoot. Left base is > 0, right base < 0, so the two can
-  // never coincide; no duplicate check needed.
+  // side_clearance. A single adaptive retry may enlarge it later by the measured
+  // trajectory deficit. Left base is > 0, right base < 0, so the two can never
+  // coincide; no duplicate check is needed.
   auto append_side =
     [&]( const ShiftCandidate& base, double sign )
     {
@@ -496,13 +359,7 @@ generate_opposite_lane_candidate_variants(
 {
   std::vector<ShiftCandidate> candidates;
 
-  if( !params.opposite_lane_enabled )
-  {
-    return candidates;
-  }
-
-  const double ego_half_width =
-    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
+  const double ego_half_width = 0.5 * ego_params.body_width;
   const double required_lane_margin = 0.0;
 
   const std::array<double, 3> sample_s_values = {{
@@ -629,7 +486,6 @@ generate_opposite_lane_candidate_variants(
     requested_centers.push_back(
       std::clamp( opposite_center_l, center_l_min, center_l_max ) );
 
-    std::size_t generated_for_side = 0;
     for( double requested_center_l : requested_centers )
     {
       const double shift = std::clamp( requested_center_l, center_l_min, center_l_max );
@@ -644,8 +500,6 @@ generate_opposite_lane_candidate_variants(
       }
 
       append_unique_candidate( shift );
-      ++generated_for_side;
-
     }
 
   }
@@ -663,15 +517,11 @@ validate_planned_shift_trajectory(
   AvoidanceCandidateType candidate_type,
   const dynamics::PhysicalVehicleParameters& ego_params,
   const ObstacleAvoidanceParams& params,
+  double target_side_clearance,
   double initial_s_hint )
 {
   TrajectoryValidationResult result;
   result.reason = "trajectory valid";
-
-  if( !params.validate_shifted_trajectory )
-  {
-    return result;
-  }
 
   if( trajectory.states.empty() )
   {
@@ -680,59 +530,49 @@ validate_planned_shift_trajectory(
     return result;
   }
 
-  const double ego_half_width =
-    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
+  const double ego_half_width = 0.5 * ego_params.body_width;
   const double ego_front_offset =
     ego_params.wheelbase + ego_params.front_axle_to_front_border;
   const double ego_rear_offset =
     ego_params.rear_border_to_rear_axle;
-  // Route points are shifted in the original route frame and the resulting
-  // trajectory is then interpolated and projected back onto that frame. On
-  // curved/discretized map segments this round trip introduces millimetre- to
-  // centimetre-scale lateral error. Keep the configured clearance in route
-  // construction exact, but do not reject that route for numerical noise.
-  constexpr double geometry_validation_tolerance = 0.02;
+  // Keep collision validation tied to the real rear-axle footprint even though
+  // the configured route-shift plateau uses a symmetric half-body-length
+  // policy. This prevents the policy from hiding an actual front/rear overlap.
+  const double group_timing_s_min =
+    group.envelope.object_s_min - ego_front_offset -
+    std::max( 0.0, params.front_clearance );
+  const double group_timing_s_max =
+    group.envelope.object_s_max + ego_rear_offset +
+    std::max( 0.0, params.rear_clearance );
+  const double target_clearance =
+    std::max( 0.0, target_side_clearance );
+  const double hard_clearance =
+    std::max( 0.0, params.ego_corridor_safety_margin );
+  const std::array<double, 4> body_long_offset = {
+    ego_front_offset, ego_front_offset, -ego_rear_offset, -ego_rear_offset };
+  const std::array<double, 4> body_lat_offset = {
+    ego_half_width, -ego_half_width, -ego_half_width, ego_half_width };
+  std::vector<std::optional<double>> committed_initial_clearance(
+    group.obstacles.size() );
   double previous_s = initial_s_hint;
 
-  // Diagnostic: the first trajectory state is ego's ACTUAL current pose. Capture
-  // its route s/l and the shift the modified route wants there, so a clearance
-  // failure reveals whether ego started already on the committed (obj1) shift or
-  // below it - i.e. whether the replan has to re-develop the turn-in from an
-  // under-shifted pose (the late second-obstacle case).
+  // Diagnostic values are captured during the normal first-state pass so the
+  // first state is not projected twice.
   double traj_start_s = std::numeric_limits<double>::quiet_NaN();
   double traj_start_l = std::numeric_limits<double>::quiet_NaN();
   double traj_start_route_off = std::numeric_limits<double>::quiet_NaN();
-  if( !trajectory.states.empty() )
-  {
-    const auto& first_state = trajectory.states.front();
-    double first_s = adore::map::get_s_on_reference_line_segments(
-      route, first_state,
-      std::isfinite( initial_s_hint ) ? initial_s_hint : group.envelope.center_s,
-      30.0 );
-    if( !std::isfinite( first_s ) )
-    {
-      first_s = project_s_on_reference_line( route, first_state, initial_s_hint );
-    }
-    if( std::isfinite( first_s ) )
-    {
-      const auto first_frame = make_route_frame( route, first_s );
-      traj_start_s = first_s;
-      traj_start_l =
-        signed_lateral_offset( first_frame, math::Point2d{ first_state.x, first_state.y } );
-      traj_start_route_off =
-        avoidance_shift_offset_at_s(
-          first_s, group, lateral_shift, ego_params, params );
-    }
-  }
 
-  for( const auto& state : trajectory.states )
+  for( std::size_t state_index = 0;
+       state_index < trajectory.states.size();
+       ++state_index )
   {
+    const auto& state = trajectory.states[state_index];
     double state_s =
       adore::map::get_s_on_reference_line_segments(
         route,
         state,
         std::isfinite( previous_s ) ? previous_s : group.envelope.center_s,
-        30.0 );
+        std::max( 0.0, params.route_window_min ) );
 
     if( !std::isfinite( state_s ) )
     {
@@ -758,12 +598,6 @@ validate_planned_shift_trajectory(
         lateral_shift,
         ego_params,
         params );
-    const double group_timing_s_min =
-      group.envelope.object_s_min - ego_front_offset -
-      std::max( 0.0, params.front_clearance );
-    const double group_timing_s_max =
-      group.envelope.object_s_max + ego_rear_offset +
-      std::max( 0.0, params.rear_clearance );
     const bool near_obstacle =
       state_s >= group_timing_s_min &&
       state_s <= group_timing_s_max;
@@ -784,6 +618,12 @@ validate_planned_shift_trajectory(
     const auto frame = make_route_frame( route, state_s );
     const math::Point2d state_xy{ state.x, state.y };
     const double state_l = signed_lateral_offset( frame, state_xy );
+    if( state_index == 0 )
+    {
+      traj_start_s = state_s;
+      traj_start_l = state_l;
+      traj_start_route_off = planned_offset;
+    }
 
     std::optional<LateralInterval> allowed_interval;
 
@@ -857,10 +697,7 @@ validate_planned_shift_trajectory(
     const double lane_margin =
       std::min( lane_ego_min_l - allowed_interval->min_l,
                 allowed_interval->max_l - lane_ego_max_l );
-    result.min_lane_margin =
-      std::min( result.min_lane_margin, lane_margin );
-
-    if( lane_margin < -geometry_validation_tolerance )
+    if( lane_margin < 0.0 )
     {
       char buf[256];
       std::snprintf(
@@ -887,13 +724,6 @@ validate_planned_shift_trajectory(
     const double cos_yaw = std::cos( state.yaw_angle );
     const double sin_yaw = std::sin( state.yaw_angle );
 
-    // Body-frame corner offsets (longitudinal from rear axle, lateral) in
-    // polygon boundary order: front-left, front-right, rear-right, rear-left.
-    const std::array<double, 4> body_long_offset = {
-      ego_front_offset, ego_front_offset, -ego_rear_offset, -ego_rear_offset };
-    const std::array<double, 4> body_lat_offset = {
-      ego_half_width, -ego_half_width, -ego_half_width, ego_half_width };
-
     std::array<double, 4> corner_s{};
     std::array<double, 4> corner_l{};
     double ego_s_lo = std::numeric_limits<double>::infinity();
@@ -908,7 +738,10 @@ validate_planned_shift_trajectory(
 
       double corner_s_value =
         adore::map::get_s_on_reference_line_segments(
-          route, corner_xy, state_s, 30.0 );
+          route,
+          corner_xy,
+          state_s,
+          std::max( 0.0, params.route_window_min ) );
       if( !std::isfinite( corner_s_value ) )
       {
         corner_s_value = project_s_on_reference_line( route, corner_xy, state_s );
@@ -971,20 +804,11 @@ validate_planned_shift_trajectory(
       return lo_l <= hi_l;
     };
 
-    for( const auto& obstacle : group.obstacles )
+    for( std::size_t obstacle_index = 0;
+         obstacle_index < group.obstacles.size();
+         ++obstacle_index )
     {
-      // Skip the trajectory clearance check for obstacles that belong to the
-      // already-committed maneuver ego is executing. During a replan for a NEW
-      // obstacle they are re-checked from ego's current, transiently lagging /
-      // angled turn-in pose, where the committed obstacle spuriously fails even
-      // though ego is passing it correctly. They stay in the group (so the route
-      // still shifts to clear them); only their re-validation is suppressed. The
-      // flag is set geometrically (span overlaps the committed hold region), so
-      // this is id-independent and survives the object dropping out of perception.
-      if( obstacle.committed_hold )
-      {
-        continue;
-      }
+      const auto& obstacle = group.obstacles[obstacle_index];
 
       double ego_min_l;
       double ego_max_l;
@@ -1021,24 +845,47 @@ validate_planned_shift_trajectory(
       const double right_clearance = obstacle.object_l_min - ego_max_l;
       const double actual_clearance =
         std::max( left_clearance, right_clearance );
-      const double required_clearance =
-        std::max( 0.0, params.side_clearance );
-      const double obstacle_lateral_margin =
-        actual_clearance - required_clearance;
+      const double target_lateral_margin =
+        actual_clearance - target_clearance;
 
       result.min_obstacle_lateral_margin =
-        std::min( result.min_obstacle_lateral_margin, obstacle_lateral_margin );
+        std::min(
+          result.min_obstacle_lateral_margin,
+          target_lateral_margin );
 
-      if( obstacle_lateral_margin < -geometry_validation_tolerance )
+      // A replan can start while ego is already alongside an accepted obstacle
+      // and transiently closer than the normal hard margin. That existing state
+      // cannot be undone. Record its first-state clearance and require every
+      // future overlapping state to be no worse. All committed obstacles that
+      // are not alongside at the first state retain the full hard-clearance
+      // requirement, so a future committed obstacle is never skipped.
+      if( state_index == 0 && obstacle.committed_hold )
+      {
+        committed_initial_clearance[obstacle_index] =
+          actual_clearance;
+      }
+
+      double required_clearance = hard_clearance;
+      if( committed_initial_clearance[obstacle_index].has_value() )
+      {
+        required_clearance =
+          std::min(
+            required_clearance,
+            committed_initial_clearance[obstacle_index].value() );
+      }
+
+      if( actual_clearance + 1e-9 < required_clearance )
       {
         char buf[448];
         std::snprintf(
           buf,
           sizeof( buf ),
-          "trajectory validation failed: insufficient obstacle side clearance at s=%.2f actual_clearance=%.2f required=%.2f (planned_offset=%.2f traj_state_l=%.2f ego_l=[%.2f,%.2f] obstacle_l=[%.2f,%.2f]) ego_start=[s=%.1f l=%.2f route_off=%.2f]",
+          "trajectory validation failed: obstacle enters hard ego corridor at s=%.2f actual_clearance=%.2f required_clearance=%.2f hard_clearance=%.2f target_clearance=%.2f (planned_offset=%.2f traj_state_l=%.2f ego_l=[%.2f,%.2f] obstacle_l=[%.2f,%.2f]) ego_start=[s=%.1f l=%.2f route_off=%.2f]",
           state_s,
           actual_clearance,
           required_clearance,
+          hard_clearance,
+          target_clearance,
           planned_offset,
           state_l,
           ego_min_l,
@@ -1049,15 +896,11 @@ validate_planned_shift_trajectory(
           traj_start_l,
           traj_start_route_off );
         result.valid = false;
+        result.obstacle_clearance_violation = true;
         result.reason = buf;
         return result;
       }
     }
-  }
-
-  if( !std::isfinite( result.min_lane_margin ) )
-  {
-    result.min_lane_margin = 0.0;
   }
 
   if( !std::isfinite( result.min_obstacle_lateral_margin ) )
@@ -1066,35 +909,6 @@ validate_planned_shift_trajectory(
   }
 
   return result;
-}
-
-double
-score_route_shift_candidate( const RouteShiftPlanCandidate& candidate,
-                             const ObstacleAvoidanceParams& params )
-{
-  double score = 0.0;
-
-  // Hard safety checks have already accepted the candidate; scoring is for
-  // choosing the least intrusive accepted maneuver.
-  score += std::fabs( candidate.shift_candidate.shift );
-  score +=
-    candidate.shift_candidate.in_lane
-      ? 0.0
-      : params.lateral_shift_penalty_score;
-  score += candidate.uses_opposite_lane ? params.opposite_lane_penalty_score : 0.0;
-  score -= 0.5 * std::max( 0.0, candidate.validation.min_lane_margin );
-  score -= 0.5 * std::max( 0.0, candidate.validation.min_obstacle_lateral_margin );
-
-  if( candidate.uses_opposite_lane &&
-      std::isfinite( candidate.oncoming.oncoming_arrival_time ) )
-  {
-    const double gap_margin =
-      candidate.oncoming.oncoming_arrival_time
-      - candidate.oncoming.ego_clear_time;
-    score -= 0.1 * std::max( 0.0, gap_margin );
-  }
-
-  return score;
 }
 
 } // namespace oa_detail

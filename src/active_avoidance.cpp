@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstddef>
 #include <cstdio>
 #include <limits>
 #include <optional>
@@ -21,16 +20,6 @@ namespace adore
 {
 namespace planner
 {
-namespace
-{
-
-// Tolerance added on top of the odometry-based advance when judging whether a
-// new projection onto the active modified route is plausible. Covers projection
-// refinement noise between cycles.
-constexpr double MAX_PLAUSIBLE_MODIFIED_S_JUMP = 2.0;
-
-} // namespace
-
 void
 start_active_avoidance_state(
     ActiveAvoidanceState& state,
@@ -58,15 +47,11 @@ start_active_avoidance_state(
 
     state.last_modified_s = std::numeric_limits<double>::quiet_NaN();
     state.last_modified_time = std::numeric_limits<double>::quiet_NaN();
-
-    // A freshly (re)committed maneuver supersedes any prior oncoming-wait hold.
-    state.clear_oncoming_wait();
 }
 
 bool
 should_stop_for_oncoming_monitor_result(
-    const ObstacleAvoidanceMonitorResult& monitor_result,
-    const ObstacleAvoidanceParams& params )
+    const ObstacleAvoidanceMonitorResult& monitor_result )
 {
     if( monitor_result.should_abort_before_commitment )
     {
@@ -76,72 +61,6 @@ should_stop_for_oncoming_monitor_result(
     if( monitor_result.safe_to_continue )
     {
         return false;
-    }
-
-    if( params.stop_for_oncoming_after_commitment )
-    {
-        return true;
-    }
-
-    return monitor_result.oncoming.oncoming_arrival_time <= 1e-6;
-}
-
-bool
-routes_have_compatible_geometry(
-    const map::Route& baseline,
-    const map::Route& candidate,
-    double position_tolerance,
-    double length_tolerance )
-{
-    if( baseline.reference_line.size() < 2 ||
-        candidate.reference_line.size() < 2 )
-    {
-        return false;
-    }
-
-    position_tolerance = std::max( 0.0, position_tolerance );
-    length_tolerance = std::max( 0.0, length_tolerance );
-
-    const double baseline_first_s = baseline.reference_line.begin()->first;
-    const double baseline_last_s = baseline.reference_line.rbegin()->first;
-    const double candidate_first_s = candidate.reference_line.begin()->first;
-    const double candidate_last_s = candidate.reference_line.rbegin()->first;
-    const double baseline_length = baseline_last_s - baseline_first_s;
-    const double candidate_length = candidate_last_s - candidate_first_s;
-
-    if( !std::isfinite( baseline_length ) ||
-        !std::isfinite( candidate_length ) ||
-        baseline_length <= 0.0 ||
-        candidate_length <= 0.0 ||
-        std::fabs( baseline_length - candidate_length ) > length_tolerance )
-    {
-        return false;
-    }
-
-    // Normalized sampling tolerates harmless re-sampling while still detecting
-    // a genuinely different mission geometry with the same destination.
-    constexpr int sample_count = 20;
-    for( int i = 0; i <= sample_count; ++i )
-    {
-        const double alpha =
-            static_cast<double>( i ) / static_cast<double>( sample_count );
-        const double baseline_s =
-            baseline_first_s + alpha * baseline_length;
-        const double candidate_s =
-            candidate_first_s + alpha * candidate_length;
-        const auto baseline_pose = baseline.get_pose_at_s( baseline_s );
-        const auto candidate_pose = candidate.get_pose_at_s( candidate_s );
-
-        if( !std::isfinite( baseline_pose.x ) ||
-            !std::isfinite( baseline_pose.y ) ||
-            !std::isfinite( candidate_pose.x ) ||
-            !std::isfinite( candidate_pose.y ) ||
-            std::hypot(
-                baseline_pose.x - candidate_pose.x,
-                baseline_pose.y - candidate_pose.y ) > position_tolerance )
-        {
-            return false;
-        }
     }
 
     return true;
@@ -164,35 +83,8 @@ make_oncoming_monitor_conflict(
         std::max( 0.0, monitor_result.oncoming.conflict_start_s - reference_s );
     conflict.time_to_conflict = monitor_result.oncoming.oncoming_arrival_time;
     conflict.predicted_spatiotemporal_conflict = true;
-    conflict.requires_stop = true;
     conflict.reason = monitor_result.reason;
     return conflict;
-}
-
-bool
-static_or_slow_conflict_has_side_clearance(
-    const planner::RouteCorridorConflict& conflict,
-    const dynamics::PhysicalVehicleParameters& vehicle_params,
-    const planner::ObstacleAvoidanceParams& params )
-{
-    if( conflict.object_class != planner::RouteCorridorObjectClass::StaticOrSlow ||
-        conflict.currently_overlaps_ego_footprint ||
-        !std::isfinite( conflict.object_l_min ) ||
-        !std::isfinite( conflict.object_l_max ) )
-    {
-        return false;
-    }
-
-    const double ego_half_width =
-        0.5 * std::max( params.min_vehicle_dimension, vehicle_params.body_width );
-    const double actual_clearance =
-        actual_lateral_clearance_to_centered_ego(
-            conflict.object_l_min,
-            conflict.object_l_max,
-            ego_half_width );
-    const double required_clearance = std::max( 0.0, params.side_clearance );
-
-    return actual_clearance + 0.02 >= required_clearance;
 }
 
 RouteStopPlan
@@ -273,31 +165,24 @@ should_stop_for_active_conflict(
         return true;
     }
 
-    if( conflict.predicted_spatiotemporal_conflict &&
-        conflict.time_to_conflict <= params.modified_route_stop_ttc_threshold )
-    {
-        if( conflict.object_class != planner::RouteCorridorObjectClass::StaticOrSlow )
-        {
-            return true;
-        }
+    const bool relevant_conflict =
+        conflict.predicted_spatiotemporal_conflict ||
+        conflict.currently_overlaps_route_corridor;
 
-        return stop_plan.ego_s >= stop_plan.brake_start_s;
-    }
-
-    if( conflict.currently_overlaps_route_corridor &&
-        stop_plan.ego_s >= stop_plan.brake_start_s )
-    {
-        return true;
-    }
-
-    return false;
+    // The stop decision is purely spatial and vehicle-dependent: begin once ego
+    // reaches the braking point derived from current speed, planned deceleration,
+    // stand-off and braking safety margin. A separate fixed TTC threshold can
+    // otherwise request braking too late at high speed or too early at low speed.
+    return relevant_conflict &&
+           stop_plan.ego_s >= stop_plan.brake_start_s;
 }
 
 std::optional<double>
 compute_monotonic_ego_s_modified(
     double ego_s_modified_raw,
     const dynamics::VehicleStateDynamic& vehicle_state_dynamic,
-    ActiveAvoidanceState& state )
+    ActiveAvoidanceState& state,
+    const ObstacleAvoidanceParams& params )
 {
     double ego_s_modified = ego_s_modified_raw;
 
@@ -318,7 +203,8 @@ compute_monotonic_ego_s_modified(
         const double odometry_advance =
             std::max( 0.0, vehicle_state_dynamic.vx ) * dt;
         const double max_plausible_advance =
-            odometry_advance + MAX_PLAUSIBLE_MODIFIED_S_JUMP;
+            odometry_advance +
+            std::max( 0.0, params.projection_progress_tolerance );
 
         if( ego_s_modified_raw < state.last_modified_s )
         {

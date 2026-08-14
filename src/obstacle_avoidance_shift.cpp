@@ -28,24 +28,20 @@ avoidance_shift_alpha_at_s( double s,
                             const dynamics::PhysicalVehicleParameters& ego_params,
                             const ObstacleAvoidanceParams& params )
 {
-  // The shift holds FULL magnitude over every ego-center (rear-axle) position where
-  // any part of the ego footprint is alongside the obstacle: the front corner reaches
-  // object_s_min while the rear axle is still ego_front_offset short, and the rear
-  // corner clears object_s_max only ego_rear_offset later. So the full-shift plateau
-  // spans [object_s_min - ego_front_offset, object_s_max + ego_rear_offset], with
-  // front_clearance / rear_clearance the comfort ramp lengths added outside it.
-  const double ego_front_offset =
-    ego_params.wheelbase + ego_params.front_axle_to_front_border;
-  const double ego_rear_offset = ego_params.rear_border_to_rear_axle;
+  // Build the full-shift plateau symmetrically around the obstacle:
+  // [object_s_min - 0.5 * ego_length, object_s_max + 0.5 * ego_length].
+  // front_clearance / rear_clearance add the comfort ramps outside this plateau.
+  const double ego_half_length =
+    symmetric_shift_ego_half_length( ego_params );
 
   const double hold_start_s =
     obstacle.has_persistent_profile
       ? obstacle.persistent_full_shift_start_s
-      : obstacle.object_s_min - ego_front_offset;
+      : obstacle.object_s_min - ego_half_length;
   const double hold_end_s =
     obstacle.has_persistent_profile
       ? obstacle.persistent_full_shift_end_s
-      : obstacle.object_s_max + ego_rear_offset;
+      : obstacle.object_s_max + ego_half_length;
 
   const double shift_start_s =
     obstacle.has_persistent_profile
@@ -66,7 +62,8 @@ avoidance_shift_alpha_at_s( double s,
   if( s < hold_start_s )
   {
     return smoothstep01(
-      ( s - shift_start_s ) / std::max( 0.1, hold_start_s - shift_start_s ) );
+      ( s - shift_start_s ) /
+      std::max( 1e-6, hold_start_s - shift_start_s ) );
   }
 
   if( s <= hold_end_s )
@@ -75,7 +72,8 @@ avoidance_shift_alpha_at_s( double s,
   }
 
   return 1.0 - smoothstep01(
-    ( s - hold_end_s ) / std::max( 0.1, shift_end_s - hold_end_s ) );
+    ( s - hold_end_s ) /
+    std::max( 1e-6, shift_end_s - hold_end_s ) );
 }
 
 double
@@ -91,8 +89,7 @@ required_signed_shift_for_obstacle(
     return 0.0;
   }
 
-  const double ego_half_width =
-    0.5 * std::max( params.min_vehicle_dimension, ego_params.body_width );
+  const double ego_half_width = 0.5 * ego_params.body_width;
   const double side_clearance =
     std::max( 0.0, params.side_clearance );
 
@@ -250,12 +247,11 @@ build_modified_avoidance_route( const map::Route& route,
   }
 
   // Clearance-based shift window (see avoidance_shift_alpha_at_s): matches the
-  // lateral shift window (plateau extended by the ego front/rear overhang, plus the
-  // front_clearance / rear_clearance ramps) so the speed profile ramps over the same
-  // span.
-  const double ego_front_offset =
-    ego_params.wheelbase + ego_params.front_axle_to_front_border;
-  const double ego_rear_offset = ego_params.rear_border_to_rear_axle;
+  // lateral shift window (plateau extended symmetrically by half the ego length,
+  // plus the front_clearance / rear_clearance ramps) so the speed profile ramps
+  // over the same span.
+  const double ego_half_length =
+    symmetric_shift_ego_half_length( ego_params );
   std::vector<AvoidanceSpeedSegment> speed_segments;
   speed_segments.reserve( group.obstacles.size() );
   for( const auto& obstacle : group.obstacles )
@@ -263,11 +259,11 @@ build_modified_avoidance_route( const map::Route& route,
     const double full_start_s =
       obstacle.has_persistent_profile
         ? obstacle.persistent_full_shift_start_s
-        : obstacle.object_s_min - ego_front_offset;
+        : obstacle.object_s_min - ego_half_length;
     const double full_end_s =
       obstacle.has_persistent_profile
         ? obstacle.persistent_full_shift_end_s
-        : obstacle.object_s_max + ego_rear_offset;
+        : obstacle.object_s_max + ego_half_length;
     const double obstacle_shift_start_s =
       obstacle.has_persistent_profile
         ? obstacle.persistent_ramp_start_s
